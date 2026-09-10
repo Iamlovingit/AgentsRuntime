@@ -14,14 +14,20 @@ const (
 var (
 	ErrNoFreePort         = errors.New("no free port")
 	ErrDraining           = errors.New("runtime pod is draining")
+	ErrUpgradeStandby     = errors.New("runtime pod is waiting for upgrade activation")
 	ErrRuntimeType        = errors.New("agent_type does not match runtime type")
 	ErrWorkspacePath      = errors.New("workspace path is outside requested instance")
 	ErrStaleGeneration    = errors.New("stale gateway generation")
+	ErrActiveGeneration   = errors.New("previous gateway generation is still active")
 	ErrGatewayStartFailed = errors.New("gateway start failed")
+	ErrGatewayStopFailed  = errors.New("gateway stop was not confirmed")
+	ErrWriterLeaseActive  = errors.New("workspace writer lease is active")
 )
 
 type Config struct {
 	RuntimeType           string
+	OpenClawVersion       string
+	UpgradeID             string
 	Runtime               RuntimeProfile
 	WorkspaceRoot         string
 	GatewayPortStart      int
@@ -129,21 +135,23 @@ type PortRange struct {
 }
 
 type CreateGatewayRequest struct {
-	InstanceID    int               `json:"instance_id"`
-	UserID        int               `json:"user_id"`
-	AgentType     string            `json:"agent_type"`
-	WorkspacePath string            `json:"workspace_path"`
-	GatewayPort   int               `json:"gateway_port,omitempty"`
-	PortRange     PortRange         `json:"port_range"`
-	UID           int               `json:"uid"`
-	GID           int               `json:"gid"`
-	CPUCores      int               `json:"cpu_cores"`
-	MemoryMB      int               `json:"memory_mb"`
-	DiskQuotaMB   int               `json:"disk_quota_mb"`
-	Generation    int               `json:"generation"`
-	RequestID     string            `json:"request_id,omitempty"`
-	Environment   map[string]string `json:"environment,omitempty"`
-	Env           map[string]string `json:"env,omitempty"`
+	InstanceID          int               `json:"instance_id"`
+	UserID              int               `json:"user_id"`
+	AgentType           string            `json:"agent_type"`
+	WorkspacePath       string            `json:"workspace_path"`
+	ProjectRelativePath string            `json:"project_relative_path,omitempty"`
+	GatewayPort         int               `json:"gateway_port,omitempty"`
+	PortRange           PortRange         `json:"port_range"`
+	UID                 int               `json:"uid"`
+	GID                 int               `json:"gid"`
+	CPUCores            int               `json:"cpu_cores"`
+	MemoryMB            int               `json:"memory_mb"`
+	DiskQuotaMB         int               `json:"disk_quota_mb"`
+	Generation          int               `json:"generation"`
+	RequestID           string            `json:"request_id,omitempty"`
+	UpgradeID           string            `json:"upgrade_id,omitempty"`
+	Environment         map[string]string `json:"environment,omitempty"`
+	Env                 map[string]string `json:"env,omitempty"`
 }
 
 type CreateGatewayResponse struct {
@@ -187,44 +195,54 @@ type GatewayHealthChecker interface {
 }
 
 type GatewayState struct {
-	InstanceID    int       `json:"instance_id"`
-	UserID        int       `json:"user_id,omitempty"`
-	GatewayID     string    `json:"gateway_id"`
-	RuntimeType   string    `json:"runtime_type"`
-	WorkspacePath string    `json:"workspace_path"`
-	Port          int       `json:"gateway_port"`
-	PortAlias     int       `json:"port,omitempty"`
-	PID           int       `json:"gateway_pid,omitempty"`
-	UID           int       `json:"uid,omitempty"`
-	GID           int       `json:"gid,omitempty"`
-	CPUCores      int       `json:"cpu_cores,omitempty"`
-	MemoryMB      int       `json:"memory_mb,omitempty"`
-	DiskQuotaMB   int       `json:"disk_quota_mb,omitempty"`
-	Generation    int       `json:"generation"`
-	State         string    `json:"state"`
-	ErrorMessage  string    `json:"error_message,omitempty"`
-	HealthAt      time.Time `json:"health_at,omitempty"`
-	StartedAt     time.Time `json:"started_at,omitempty"`
-	UpdatedAt     time.Time `json:"updated_at,omitempty"`
+	InstanceID     int       `json:"instance_id"`
+	UserID         int       `json:"user_id,omitempty"`
+	GatewayID      string    `json:"gateway_id"`
+	RuntimeType    string    `json:"runtime_type"`
+	WorkspacePath  string    `json:"workspace_path"`
+	Port           int       `json:"gateway_port"`
+	PortAlias      int       `json:"port,omitempty"`
+	PID            int       `json:"gateway_pid,omitempty"`
+	UID            int       `json:"uid,omitempty"`
+	GID            int       `json:"gid,omitempty"`
+	CPUCores       int       `json:"cpu_cores,omitempty"`
+	MemoryMB       int       `json:"memory_mb,omitempty"`
+	DiskQuotaMB    int       `json:"disk_quota_mb,omitempty"`
+	Generation     int       `json:"generation"`
+	State          string    `json:"state"`
+	ErrorMessage   string    `json:"error_message,omitempty"`
+	FailureClass   string    `json:"failure_class,omitempty"`
+	ExitCode       *int      `json:"exit_code,omitempty"`
+	Retryable      *bool     `json:"retryable,omitempty"`
+	RestartAttempt int       `json:"restart_attempt,omitempty"`
+	HealthAt       time.Time `json:"health_at,omitempty"`
+	StartedAt      time.Time `json:"started_at,omitempty"`
+	UpdatedAt      time.Time `json:"updated_at,omitempty"`
 }
 
 type RegisterPayload struct {
-	RuntimeType    string    `json:"runtime_type"`
-	Namespace      string    `json:"namespace"`
-	PodName        string    `json:"pod_name"`
-	PodUID         string    `json:"pod_uid,omitempty"`
-	PodIP          string    `json:"pod_ip"`
-	NodeName       string    `json:"node_name,omitempty"`
-	DeploymentName string    `json:"deployment_name"`
-	ImageRef       string    `json:"image_ref"`
-	AgentEndpoint  string    `json:"agent_endpoint"`
-	State          string    `json:"state"`
-	Capacity       int       `json:"capacity"`
-	MaxGateways    int       `json:"max_gateways"`
-	UsedSlots      int       `json:"used_slots"`
-	AvailableSlots int       `json:"available_slots"`
-	Draining       bool      `json:"draining"`
-	ReportedAt     time.Time `json:"reported_at"`
+	RuntimeType       string    `json:"runtime_type"`
+	OpenClawVersion   string    `json:"openclaw_version,omitempty"`
+	Capabilities      []string  `json:"capabilities,omitempty"`
+	ProtocolVersion   string    `json:"protocol_version,omitempty"`
+	TeamPluginVersion string    `json:"team_plugin_version,omitempty"`
+	SessionStore      string    `json:"session_store,omitempty"`
+	ImageDigest       string    `json:"image_digest,omitempty"`
+	Namespace         string    `json:"namespace"`
+	PodName           string    `json:"pod_name"`
+	PodUID            string    `json:"pod_uid,omitempty"`
+	PodIP             string    `json:"pod_ip"`
+	NodeName          string    `json:"node_name,omitempty"`
+	DeploymentName    string    `json:"deployment_name"`
+	ImageRef          string    `json:"image_ref"`
+	AgentEndpoint     string    `json:"agent_endpoint"`
+	State             string    `json:"state"`
+	Capacity          int       `json:"capacity"`
+	MaxGateways       int       `json:"max_gateways"`
+	UsedSlots         int       `json:"used_slots"`
+	AvailableSlots    int       `json:"available_slots"`
+	Draining          bool      `json:"draining"`
+	ReportedAt        time.Time `json:"reported_at"`
 }
 
 type RegisterResponse struct {
