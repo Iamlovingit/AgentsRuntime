@@ -31,10 +31,12 @@ reports; malformed or forged evidence suppresses the entire capability.
 Both states require the same fixed source identity, protocol/backend/auth modes,
 mandatory artifact inventory and payload hash. Startup verifies every listed
 image-owned file's actual SHA-256, bounded size, ownership, permissions, path and
-executable bits. The deployment must retain its immutable image reference,
-managed launcher, authenticated control/report channels, bounded trusted proxy
-CIDRs, internal Service endpoints and separate instance/state paths. Verification
-runs once at startup and health reads return a cloned immutable snapshot.
+executable bits. The deployment must retain its managed launcher, authenticated
+control/report channels, bounded trusted proxy CIDRs, internal Service endpoints
+and separate instance/state paths. `CLAWMANAGER_RUNTIME_IMAGE_REF` is reported as
+deployment metadata and is not treated as proof of the running image's identity;
+tags and digests are both accepted. Verification runs once at startup and health
+reads return a cloned immutable snapshot.
 
 CM can use this verified protocol capability to open the authorized user's
 Desktop without waiting for a browser campaign that itself requires the Desktop

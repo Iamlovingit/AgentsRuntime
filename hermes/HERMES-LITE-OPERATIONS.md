@@ -22,7 +22,7 @@ Required runtime configuration:
 | --- | --- |
 | `RUNTIME_AGENT_CONTROL_TOKEN`, `RUNTIME_AGENT_REPORT_TOKEN` | Managed Pod secrets; never sent to Hermes children |
 | `CLAWMANAGER_BACKEND_URL` | Kubernetes Service DNS; supplies the trusted HTTP `Date` clock reference |
-| `CLAWMANAGER_RUNTIME_IMAGE_REF` | Immutable `repository@sha256:<64 hex characters>` |
+| `CLAWMANAGER_RUNTIME_IMAGE_REF` | Image reference reported for diagnostics; tags and digests are accepted |
 | `RUNTIME_AGENT_DATA_DIR` | Agent-owned private directory outside `/workspaces` |
 | `CLAWMANAGER_CONTROL_UI_ORIGIN` | One explicit trusted origin used by the BFF upstream connections |
 | `CLAWMANAGER_TRUSTED_PROXY_CIDRS` | Explicit BFF/proxy addresses or CIDRs; no wildcard or `/0` |
@@ -85,6 +85,13 @@ The current new candidate remains **unaccepted** until the real CM BFF/browser
 gate passes, so it must omit this object. Do not set a version environment variable
 or edit an accepted Boolean to open the UI. Capability alone never certifies the
 appearance or completeness of CM's Desktop renderer.
+
+Production deployments should pin the container image to a digest when practical,
+but the Runtime does not enforce that policy through
+`CLAWMANAGER_RUNTIME_IMAGE_REF`. That value is self-reported deployment metadata
+and cannot prove which image the container runtime actually started. Image policy
+belongs in deployment tooling or cluster admission controls; Desktop capability
+continues to rely on the build-owned release record and verified artifact hashes.
 
 ## Lite execution and environment boundary
 
