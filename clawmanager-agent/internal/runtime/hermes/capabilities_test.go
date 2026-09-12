@@ -22,7 +22,6 @@ func TestDesktopCapabilityRequiresManagedConfiguration(t *testing.T) {
 		name string
 		edit func(*gateway.Config)
 	}{
-		{"mutable image", func(c *gateway.Config) { c.ImageRef = "hermes:latest" }},
 		{"public backend", func(c *gateway.Config) { c.BackendURL = "https://public.example" }},
 		{"public origin", func(c *gateway.Config) { c.PublicOrigin = "https://public.example" }},
 		{"missing proxy", func(c *gateway.Config) { c.TrustedProxies = nil }},
@@ -48,6 +47,16 @@ func TestDesktopCapabilityRequiresManagedConfiguration(t *testing.T) {
 				t.Fatal("unsafe configuration accepted")
 			}
 		})
+	}
+}
+
+func TestDesktopCapabilityAcceptsTaggedImageReference(t *testing.T) {
+	cfg := desktopCapabilityConfig(t)
+	for _, image := range []string{"hermes:latest", "registry.example/hermes:v2026.9.12", "registry.local/hermes:offline"} {
+		cfg.ImageRef = image
+		if !NewProfile("hermes").desktopConfigurationVerified(cfg) {
+			t.Errorf("tagged image reference %q suppressed Desktop capability", image)
+		}
 	}
 }
 

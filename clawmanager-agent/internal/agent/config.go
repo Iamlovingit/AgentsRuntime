@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -129,11 +128,6 @@ func LoadConfigFromEnv() (Config, error) {
 		backend, parseErr := url.Parse(cfg.BackendURL)
 		if parseErr != nil || backend.User != nil || backend.RawQuery != "" || backend.Fragment != "" || !(strings.HasSuffix(backend.Hostname(), ".svc.cluster.local") || strings.HasSuffix(backend.Hostname(), ".svc")) {
 			return Config{}, errors.New("Hermes Lite requires CLAWMANAGER_BACKEND_URL to use Kubernetes Service DNS")
-		}
-		repository, digest, hasDigest := strings.Cut(cfg.ImageRef, "@sha256:")
-		_, digestErr := hex.DecodeString(digest)
-		if !hasDigest || repository == "" || len(digest) != 64 || digestErr != nil || strings.ContainsAny(repository, " \t\n\r") {
-			return Config{}, errors.New("Hermes Lite requires an immutable CLAWMANAGER_RUNTIME_IMAGE_REF digest")
 		}
 	}
 	llmSettings, err := llmconfig.LoadFromEnv(llmconfig.ResolveOptions{})
