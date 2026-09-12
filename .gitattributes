@@ -13,6 +13,7 @@ hermes/tests/acceptance_model_stub.py text eol=lf
 hermes/acceptance/*.json text eol=lf
 hermes/acceptance/*.pem text eol=lf
 hermes/patches/hermes-agent/*lite*.py text eol=lf
+hermes/patches/hermes-agent/apply_team_completion_stop.py text eol=lf
 hermes/tests/*lite*.py text eol=lf
 hermes/hermes-lite.lock.json text eol=lf
 hermes/Dockerfile.lite* text eol=lf

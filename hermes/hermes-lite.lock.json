@@ -41,7 +41,7 @@
     "lite_environment.py": "b3ac25e2f81dc4f3efae8f5ef7627116becd72447264ff74f29f06b9898ea3d3",
     "lite_gateway_boundary.py": "2425fec1d93a8c2cc98bda3d32d9f8623af1a253d4811930ce0decc41b374f7a",
     "lite_non_native.py": "b2f92c336ddf005697ff7fac00ff621409549951bef03783d01857b53b16bfc2",
-    "apply_team_completion_stop.py": "ff8866963e9dcb6a293de03c85eddc1c864abd9b06834a91ded2bee99787e84b"
+    "apply_team_completion_stop.py": "4b910b6d46f639edfbb51dcc89d264031467ba281e774c04a9cdce8c16d7c994"
   },
   "test_sha256": {
     "acceptance_model_stub.py": "03d03de09eb5164b7724e5f19ff66656667e547918601d0beebd805b17b48acc",
