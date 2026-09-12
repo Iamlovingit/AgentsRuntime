@@ -28,7 +28,6 @@ name: Build and push runtime images
           - hermes-lite
           - openclaw
           - openclaw-lite
-          - openclaw-shell
           - opencode
           - opencode-lite
           - deepseek-harness
@@ -84,7 +83,6 @@ jobs:
             "hermes-lite|.|./hermes/Dockerfile.lite|hermes-lite"
             "openclaw|.|./openclaw/Dockerfile.openclaw|openclaw"
             "openclaw-lite|.|./openclaw/Dockerfile.openclaw|openclaw-lite"
-            "openclaw-shell|.|./openclaw-shell/Dockerfile|openclaw-shell"
             "opencode|.|./opencode/Dockerfile|opencode"
             "opencode-lite|.|./opencode/Dockerfile|opencode-lite"
             "deepseek-harness|.|./deepseek-harness/Dockerfile.pro|deepseek-harness"
