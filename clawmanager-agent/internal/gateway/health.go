@@ -21,6 +21,10 @@ func (noopGatewayHealthChecker) WaitReady(context.Context, GatewayStartSpec) err
 	return nil
 }
 
+func (noopGatewayHealthChecker) CheckHealth(context.Context, GatewayStartSpec) error {
+	return nil
+}
+
 type HTTPGatewayHealthChecker struct {
 	cfg    Config
 	client *http.Client
@@ -68,6 +72,10 @@ func (h *HTTPGatewayHealthChecker) WaitReady(ctx context.Context, spec GatewaySt
 		case <-timer.C:
 		}
 	}
+}
+
+func (h *HTTPGatewayHealthChecker) CheckHealth(ctx context.Context, spec GatewayStartSpec) error {
+	return h.probeOnce(ctx, spec)
 }
 
 func (h *HTTPGatewayHealthChecker) probeOnce(ctx context.Context, spec GatewayStartSpec) error {

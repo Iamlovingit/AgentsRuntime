@@ -304,6 +304,7 @@ func (m *GatewayManager) startGatewayInBackground(gatewayID string, req CreateGa
 	if process.Done != nil {
 		go m.watchGatewayProcess(gatewayID, process.PID, process.Done)
 	}
+	go m.superviseGateway(context.Background(), gatewayID, spec, process.PID)
 }
 
 func (m *GatewayManager) reconcileAutomationsWithRetry(gatewayID string, req CreateGatewayRequest, raw string, port int) {
@@ -915,6 +916,7 @@ func (m *GatewayManager) restartGatewayAfterUnexpectedExit(id string, attempt in
 	if process.Done != nil {
 		go m.watchGatewayProcess(id, process.PID, process.Done)
 	}
+	go m.superviseGateway(context.Background(), id, spec, process.PID)
 }
 
 func (m *GatewayManager) stopGatewayRecoveryProcess(process ManagedProcess) error {
@@ -1072,7 +1074,7 @@ func (m *GatewayManager) usedSlotsLocked() int {
 	count := 0
 	for _, record := range m.gateways {
 		switch record.state.State {
-		case "running", "starting":
+		case "running", "starting", "unhealthy":
 			count++
 		}
 	}

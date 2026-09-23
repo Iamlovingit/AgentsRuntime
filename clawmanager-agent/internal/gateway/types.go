@@ -192,6 +192,7 @@ type ProcessStarter interface {
 
 type GatewayHealthChecker interface {
 	WaitReady(context.Context, GatewayStartSpec) error
+	CheckHealth(context.Context, GatewayStartSpec) error
 }
 
 type GatewayState struct {

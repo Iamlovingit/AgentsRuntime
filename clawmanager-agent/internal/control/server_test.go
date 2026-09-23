@@ -671,6 +671,10 @@ func (f *fakeHealthChecker) WaitReady(context.Context, GatewayStartSpec) error {
 	return f.err
 }
 
+func (f *fakeHealthChecker) CheckHealth(context.Context, GatewayStartSpec) error {
+	return f.err
+}
+
 type blockingHealthChecker struct {
 	done chan error
 }
@@ -686,6 +690,10 @@ func (h *blockingHealthChecker) WaitReady(ctx context.Context, _ GatewayStartSpe
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func (h *blockingHealthChecker) CheckHealth(context.Context, GatewayStartSpec) error {
+	return nil
 }
 
 func (h *blockingHealthChecker) succeed() {
