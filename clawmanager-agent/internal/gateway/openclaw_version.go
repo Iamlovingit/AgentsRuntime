@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -49,7 +50,14 @@ func OpenClawCapabilities(version string) []string {
 	if !IsOpenClawAtLeast(version, OpenClaw81Version) {
 		return nil
 	}
-	return append([]string(nil), openClaw81Capabilities...)
+	capabilities := append([]string(nil), openClaw81Capabilities...)
+	if runtime.GOOS == "linux" {
+		capabilities = append(capabilities, "openclaw.upgrade-operation-fence-v1", "openclaw.rebuild-preserve-v1", "openclaw.rebuild-preserve-v2")
+	}
+	if runtime.GOOS == "linux" && version == "2026.10.2" {
+		capabilities = append(capabilities, "openclaw.managed-plugin-convergence-v1")
+	}
+	return capabilities
 }
 
 func numericVersion(raw string) []int {

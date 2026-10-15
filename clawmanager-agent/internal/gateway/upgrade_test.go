@@ -682,6 +682,37 @@ func TestRemapProbeWorkspacePathsCannotReachLiveWorkspace(t *testing.T) {
 	}
 }
 
+func TestProbeControlPathsPreserveCustomStoreLayoutWithoutLiveReferences(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "home", ".openclaw")
+	probe := filepath.Join(t.TempDir(), "home", ".openclaw")
+	config := map[string]any{
+		"agents":  map[string]any{"entries": map[string]any{"worker": map[string]any{"agentDir": filepath.Join(state, "custom", "worker")}}},
+		"session": map[string]any{"store": filepath.Join(state, "stores", "{agentId}", "sessions.json")},
+	}
+	if err := remapProbeControlPaths(config, state, probe); err != nil {
+		t.Fatal(err)
+	}
+	if got := config["session"].(map[string]any)["store"]; got != filepath.Join(probe, "stores", "{agentId}", "sessions.json") {
+		t.Fatalf("store=%v", got)
+	}
+	entry := config["agents"].(map[string]any)["entries"].(map[string]any)["worker"].(map[string]any)
+	if entry["agentDir"] != filepath.Join(probe, "custom", "worker") {
+		t.Fatalf("agentDir=%v", entry["agentDir"])
+	}
+	entry["agentDir"] = filepath.Join("home", ".openclaw", "relative-control")
+	config["session"].(map[string]any)["store"] = filepath.Join("home", ".openclaw", "stores", "{agentId}", "sessions.json")
+	if err := remapProbeControlPaths(config, state, probe); err != nil {
+		t.Fatal(err)
+	}
+	if entry["agentDir"] != filepath.Join(probe, "relative-control") {
+		t.Fatalf("relative agentDir=%v", entry["agentDir"])
+	}
+	config["session"].(map[string]any)["store"] = filepath.Join(t.TempDir(), "other-owner", "sessions.json")
+	if err := remapProbeControlPaths(config, state, probe); err == nil {
+		t.Fatal("preflight must not touch unmanaged external state")
+	}
+}
+
 func TestUpgradeStandbyRequiresMatchingDurableActivation(t *testing.T) {
 	root := t.TempDir()
 	cfg := Config{RuntimeType: "openclaw", OpenClawVersion: OpenClaw81Version, UpgradeID: "81", WorkspaceRoot: root, PodUID: "pod-target", GatewayPortStart: 32000, GatewayPortEnd: 32000, GatewayPortBlockSize: 1, Capacity: 1}

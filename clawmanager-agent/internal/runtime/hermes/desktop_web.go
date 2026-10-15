@@ -1,6 +1,8 @@
 package hermes
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,8 +19,8 @@ func desktopWebEnabled() bool { return os.Getenv(desktopWebFlag) == "true" }
 
 func validateDesktopWebRequest(cfg gateway.Config, req gateway.CreateGatewayRequest) error {
 	mode := strings.TrimSpace(os.Getenv("CLAWMANAGER_HERMES_BACKEND_MODE"))
-	if mode != "" && mode != "dashboard" {
-		return fmt.Errorf("unsupported_hermes_protocol: only dashboard mode is verified")
+	if mode != "" && mode != "serve" {
+		return fmt.Errorf("unsupported_hermes_protocol: only headless serve mode is verified")
 	}
 	if req.InstanceID <= 0 || req.UserID <= 0 || req.Generation <= 0 || req.UID <= 0 || req.GID <= 0 {
 		return fmt.Errorf("invalid_gateway_identity: positive instance, user, generation, uid and gid are required")
@@ -55,6 +57,11 @@ func dashboardCredentials(req gateway.CreateGatewayRequest) (string, string, err
 	return username, password, nil
 }
 
+func dashboardSigningSecret(password string) string {
+	digest := sha256.Sum256([]byte("clawmanager-hermes-dashboard-session-v1\x00" + password))
+	return hex.EncodeToString(digest[:])
+}
+
 func desktopWebEnvironment(base []string, cfg gateway.Config, req gateway.CreateGatewayRequest, workspace string, port int) []string {
 	var env []string
 	// Pod credentials, Python/Node injection switches, global HOME and provider
@@ -80,13 +87,20 @@ func desktopWebEnvironment(base []string, cfg gateway.Config, req gateway.Create
 	if username, password, err := dashboardCredentials(req); err == nil {
 		env = setEnv(env, "HERMES_DASHBOARD_BASIC_AUTH_USERNAME", username)
 		env = setEnv(env, "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD", password)
+		// Override invalid legacy persisted secrets without sharing signing keys
+		// between managed instances or exposing pod credentials.
+		env = setEnv(env, "HERMES_DASHBOARD_BASIC_AUTH_SECRET", dashboardSigningSecret(password))
 	}
 	if origin, proxies, err := desktopWebProxyConfig(cfg, req); err == nil {
 		env = setEnv(env, "CLAWMANAGER_CONTROL_UI_ORIGIN", origin)
 		env = setEnv(env, "CLAWMANAGER_TRUSTED_PROXY_CIDRS", strings.Join(proxies, ","))
 	}
+	if cfg.ProxyPolicyFile != "" {
+		env = setEnv(env, "CLAWMANAGER_PROXY_POLICY_FILE", cfg.ProxyPolicyFile)
+		env = setEnv(env, "CLAWMANAGER_PROXY_POLICY_NAMESPACE", cfg.Namespace)
+	}
 	values := map[string]string{
-		desktopWebFlag: "true", "CLAWMANAGER_HERMES_BACKEND_MODE": "dashboard",
+		desktopWebFlag: "true", "CLAWMANAGER_HERMES_BACKEND_MODE": "serve",
 		"CLAWMANAGER_INSTANCE_ID": strconv.Itoa(req.InstanceID), "CLAWMANAGER_GATEWAY_GENERATION": strconv.Itoa(req.Generation),
 		"CLAWMANAGER_USER_ID": strconv.Itoa(req.UserID), "CLAWMANAGER_RUNTIME_TYPE": "hermes",
 		"CLAWMANAGER_WORKSPACE_PATH": workspace, "CLAWMANAGER_GATEWAY_PORT": strconv.Itoa(port),

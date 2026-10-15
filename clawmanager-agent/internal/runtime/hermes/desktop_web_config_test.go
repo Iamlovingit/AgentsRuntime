@@ -30,6 +30,23 @@ func desktopWebConfigFixture(t *testing.T) (gateway.Config, gateway.CreateGatewa
 	}, workspace
 }
 
+func TestManagedDesktopWebPolicyCannotBeOverriddenOrPersisted(t *testing.T) {
+	cfg, req, workspace := desktopWebConfigFixture(t)
+	cfg.ProxyPolicyFile = gateway.ManagedProxyPolicyFile
+	cfg.Namespace = "tenant"
+	req.Environment["CLAWMANAGER_PROXY_POLICY_FILE"] = "/workspace/forged"
+	req.Environment["CLAWMANAGER_PROXY_POLICY_NAMESPACE"] = "other"
+	req.Environment["CLAWMANAGER_TRUSTED_PROXY_CIDRS"] = "0.0.0.0/0"
+	_, proxies, err := desktopWebProxyConfig(cfg, req)
+	if err != nil || len(proxies) != 0 {
+		t.Fatalf("managed trust leaked into config: %v %v", proxies, err)
+	}
+	env := desktopWebEnvironment(nil, cfg, req, workspace, 20000)
+	if envValue(env, "CLAWMANAGER_PROXY_POLICY_FILE") != cfg.ProxyPolicyFile || envValue(env, "CLAWMANAGER_PROXY_POLICY_NAMESPACE") != cfg.Namespace || envValue(env, "CLAWMANAGER_TRUSTED_PROXY_CIDRS") != "" {
+		t.Fatal("request overrode managed trust identity")
+	}
+}
+
 func TestDesktopWebConfigMigratesAndPreservesUserData(t *testing.T) {
 	cfg, req, workspace := desktopWebConfigFixture(t)
 	hermesHome := filepath.Join(workspace, "home", ".hermes")

@@ -37,9 +37,12 @@ func (p Profile) withVerifiedCapabilities(cfg gateway.Config, managedRoot string
 	if !ok {
 		return p
 	}
+	if cfg.ProxyPolicyFile != "" && !desktopSHA256(release.Artifacts[gateway.HermesManagedProxyPolicyMarker]) {
+		return p
+	}
 	p.capabilities = &gateway.HealthCapabilities{HermesDesktopWeb: &gateway.HermesDesktopWebCapability{
 		ContractVersion: 2, Enabled: true, HermesRef: desktopWebHermesGitRef, HermesCommit: desktopWebHermesCommit,
-		RPCProtocol: "hermes-jsonrpc-v1", BackendMode: "dashboard", AuthMode: "password-cookie",
+		RPCProtocol: "hermes-jsonrpc-v1", BackendMode: "serve", AuthMode: "password-cookie",
 		ArtifactsVerified: true, ReleaseAccepted: release.Accepted, PayloadSHA256: release.PayloadSHA256,
 	}}
 	return p
@@ -49,12 +52,12 @@ func (p Profile) desktopConfigurationVerified(cfg gateway.Config) bool {
 	if p.runtimeType != "hermes" || cfg.RuntimeType != "hermes" || !p.desktopWeb || !desktopWebEnabled() {
 		return false
 	}
-	if mode := strings.TrimSpace(os.Getenv("CLAWMANAGER_HERMES_BACKEND_MODE")); mode != "" && mode != "dashboard" {
+	if mode := strings.TrimSpace(os.Getenv("CLAWMANAGER_HERMES_BACKEND_MODE")); mode != "" && mode != "serve" {
 		return false
 	}
 	// The fixed managed Lite launcher identifies the deployment profile. Team
 	// membership belongs to individual gateway requests, not pod capabilities.
-	if len(cfg.GatewayCommand) != 1 || (cfg.GatewayCommand[0] != "start-hermes-lite-dashboard" && cfg.GatewayCommand[0] != "/usr/local/bin/start-hermes-lite-dashboard" && cfg.GatewayCommand[0] != "start-hermes-lite-runtime" && cfg.GatewayCommand[0] != "/usr/local/bin/start-hermes-lite-runtime") {
+	if len(cfg.GatewayCommand) != 1 || (cfg.GatewayCommand[0] != "start-hermes-lite-backend" && cfg.GatewayCommand[0] != "/usr/local/bin/start-hermes-lite-backend" && cfg.GatewayCommand[0] != "start-hermes-lite-runtime" && cfg.GatewayCommand[0] != "/usr/local/bin/start-hermes-lite-runtime") {
 		return false
 	}
 	if cfg.ControlToken == "" || cfg.ReportToken == "" || !filepath.IsAbs(cfg.WorkspaceRoot) || !filepath.IsAbs(cfg.AgentDataDir) || cfg.GatewayPortBlockSize != 1 || cfg.GatewayPortStart < 1 || cfg.GatewayPortEnd > 65535 || cfg.GatewayPortEnd < cfg.GatewayPortStart || cfg.Capacity < 1 {

@@ -1294,6 +1294,28 @@ func writeManagedRedisTeamPlugin(t *testing.T, root, version, runtime string) {
 	}
 }
 
+func TestBundledTeamSelectionPreservesCustomPluginsAndRejectsMissingImageBundle(t *testing.T) {
+	oldRoot := openClawGlobalPackageDir
+	openClawGlobalPackageDir = t.TempDir()
+	defer func() { openClawGlobalPackageDir = oldRoot }()
+	root := filepath.Join(openClawGlobalPackageDir, "dist", "extensions", "redis-team")
+	config := map[string]any{"plugins": map[string]any{"load": map[string]any{"paths": []any{"/user/custom-plugin"}}}}
+	if err := selectBundledRedisTeamPlugin(config); err == nil {
+		t.Fatal("missing bundled Team package must not silently use an untracked copy")
+	}
+	writeManagedRedisTeamPlugin(t, root, "0.3.1", "bundle")
+	if err := selectBundledRedisTeamPlugin(config); err != nil {
+		t.Fatal(err)
+	}
+	if err := selectBundledRedisTeamPlugin(config); err != nil {
+		t.Fatal(err)
+	}
+	paths := config["plugins"].(map[string]any)["load"].(map[string]any)["paths"].([]string)
+	if len(paths) != 2 || paths[0] != "/user/custom-plugin" || paths[1] != filepath.ToSlash(root) {
+		t.Fatalf("load paths=%v", paths)
+	}
+}
+
 func objectAt(t *testing.T, parent map[string]any, key string) map[string]any {
 	t.Helper()
 	value, ok := parent[key].(map[string]any)

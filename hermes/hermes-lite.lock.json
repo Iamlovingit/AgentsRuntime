@@ -10,7 +10,6 @@
   "node_version": "22.23.2",
   "node_packages": {
     "package.json": "1.0.0",
-    "web/package.json": "0.0.0",
     "apps/shared/package.json": "0.0.0",
     "ui-tui/package.json": "0.0.1"
   },
@@ -20,7 +19,6 @@
     "uv.lock": "383cd8f98ec23dc3fe4cf63759ec73be5a869cc953f068b4e79ec4e8ed00287d",
     "package.json": "8b5b2ea9721e8d4bdedea457f5b5bab038e7f3e11ea4e1381bd43f2e87ce04cd",
     "package-lock.json": "83beeba3f6e7826312444c7b64067488afae9ed88ad7326ecef61ac235bab86d",
-    "web/package.json": "884fec6f6a1a3c4293be5192ed492a1aaac7acfe7cd9e6f8938ca5453d31a0e9",
     "apps/shared/package.json": "61ee3dfa7d2097d9310732a3ab3554b25829c1802ed5120cdeb3d0574055be95",
     "hermes_cli/web_server.py": "c56b2f4605f0858704463a4f8ed8f3e44b56bba0f53b0e1839c33a537b4b16f4",
     "hermes_cli/runtime_provider.py": "955054a4ebac704dc7f8182dbe7431e03716d59bc80044c05da2bf8533590372",
@@ -39,20 +37,22 @@
     "apply_lite_non_native.py": "a7f7421cdfce468d69c2e8ff3e01a11ed58e34a8c1878060997f7f39c631d3ad",
     "apply_lite_tool_executor.py": "ca1e4fa39710712dfa87a383ad3e8a943789b424808154a0b5545433aaeb8d2a",
     "lite_environment.py": "b3ac25e2f81dc4f3efae8f5ef7627116becd72447264ff74f29f06b9898ea3d3",
-    "lite_gateway_boundary.py": "2425fec1d93a8c2cc98bda3d32d9f8623af1a253d4811930ce0decc41b374f7a",
-    "lite_non_native.py": "b2f92c336ddf005697ff7fac00ff621409549951bef03783d01857b53b16bfc2",
-    "apply_team_completion_stop.py": "ff8866963e9dcb6a293de03c85eddc1c864abd9b06834a91ded2bee99787e84b"
+    "lite_gateway_boundary.py": "4e476836bc1aa01f7aca1adbe7a56aa994ef9895fc14a3f862a0da4f7f1eabdd",
+    "lite_non_native.py": "2aca8c57abaef4c9e7a97c87c7fcd13b1c15148364c4a8094fe28d9a75880b94",
+    "apply_team_completion_stop.py": "442d156b27f3a7a2805f75f8a87acb503e6d0f70c49531ec7c46ce63afaac979",
+    "apply_profile_external_skill_dedupe.py": "293e11bed172018caf167313e10148c5933adc2fcfcc493971764c8c0631552d"
   },
   "test_sha256": {
     "acceptance_model_stub.py": "03d03de09eb5164b7724e5f19ff66656667e547918601d0beebd805b17b48acc",
     "check_lite_tool_executor.py": "e07a3c1e3af3873c49b4d7151f5875dad10565c823e31996e632c534ccdb1b0f",
     "cm_bff_browser.mjs": "358b6df20f43ea39de69eea532df4366b8ed0f840657fc3abf83457c1f45f75f",
-    "smoke_lite_agent.py": "35ddbbf2b5e9e46720945739f60a94bf846c52d3616aca032245af1b1eeb20fd",
+    "smoke_lite_agent.py": "a114702b2af77dc2836103663d4d02cf737a6b0c8e4b24618735b1462b777a7c",
     "smoke_lite_cm_bff_browser.py": "dc2da24236fc35f9717611cf7a86f7b8ab72cd2a999f241d6b5a404d9add277e",
-    "smoke_lite_desktop_rpc.py": "bb377c4a9f5854afd48d0526dca57501358879dcdc791f239d1c15c1339ca864",
-    "smoke_lite_image.py": "2589133ebfd8fab67d38acd2513ea1202ccc7c2124d76d983b58cd529d742374",
+    "smoke_lite_desktop_rpc.py": "be5198e07de0c06cec029a97545fe44a464f2258db3c26681006c1f114238387",
+    "smoke_lite_image.py": "88e3c6dfb0cfbcdcdfababd8ac6f5ac5b32dc79c43314d62330adde1b3029a1f",
     "smoke_lite_non_native.py": "6f13ccc46d07d52cf20252a28e82e0b5341bfd9c450aae72375d59248b0b8cf2",
-    "smoke_lite_provider.py": "ddc80471c029676e32d56139b0426b0c4d471e8b265599a22e28fb9201607a42"
+    "smoke_lite_provider.py": "ddc80471c029676e32d56139b0426b0c4d471e8b265599a22e28fb9201607a42",
+    "smoke_lite_team.py": "a6d2d7c0a9f3789b417a0041761014a207c4a342a85c7383a4840f65b81071c0"
   },
   "acceptance_sha256": {
     "acceptance-protocol.json": "0ab55c5990e818f25851ed55b92f0cec4da4f899167b4020982e0b30872213ae",

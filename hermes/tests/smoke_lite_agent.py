@@ -54,7 +54,9 @@ def main():
         request = urllib.request.Request("http://127.0.0.1:19090" + path, data=data, method=method,
                                          headers={"X-ClawManager-Control-Token": keys["control"],
                                                   "Content-Type": "application/json"})
-        with opener.open(request, timeout=5) as response:
+        # Team shutdown drains its Redis consumer as well as the Web process.
+        # Match the bounded control-plane operation budget, not a ping timeout.
+        with opener.open(request, timeout=30) as response:
             raw = response.read()
             return json.loads(raw) if raw else None
 
@@ -72,7 +74,7 @@ def main():
             time.sleep(0.2)
         raise AssertionError("real agent did not report running")
 
-    with tempfile.TemporaryDirectory(prefix="hermes-agent-smoke-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="hsa-") as temporary:
         root = Path(temporary)
         root.chmod(0o755)
         workspaces = root / "workspaces"
@@ -89,7 +91,8 @@ def main():
             "RUNTIME_WORKSPACE_ROOT": str(workspaces), "RUNTIME_AGENT_DATA_DIR": str(root / "agent-data"),
             "CLAWMANAGER_CONTROL_UI_ORIGIN": "http://clawmanager-backend.smoke.svc:19091",
             "CLAWMANAGER_TRUSTED_PROXY_CIDRS": "192.0.2.0/24",
-            "CLAWMANAGER_HERMES_DESKTOP_WEB_ENABLED": "true", "CLAWMANAGER_HERMES_BACKEND_MODE": "dashboard",
+            "CLAWMANAGER_HERMES_DESKTOP_WEB_ENABLED": "true", "CLAWMANAGER_HERMES_BACKEND_MODE": "serve",
+            "POD_NAMESPACE": "isolated-smoke",
         })
         request = {"instance_id": 11, "user_id": 7, "agent_type": "hermes", "workspace_path": str(workspace),
                    "gateway_port": 20001, "uid": 10001, "gid": 10001, "generation": 1,
@@ -116,6 +119,30 @@ def main():
                     time.sleep(0.2)
                 else:
                     raise AssertionError("shared agent control readiness timed out")
+                if Path("/usr/local/share/clawmanager/hermes-proxy-policy-v1").is_file():
+                    def renew_policy():
+                        current = control("/v1/proxy-policy")
+                        control("/v1/proxy-policy", {"namespace": "isolated-smoke", "expected_revision": current["revision"], "proxies": ["192.0.2.8"]}, method="PUT")
+                    renew_policy()
+                    policy_path = Path("/run/clawmanager-proxy-policy/policy.json")
+                    assert policy_path.parent.stat().st_mode & 0o777 == 0o755, "managed lease directory cannot be traversed by isolated readers"
+                    reader = subprocess.run(
+                        ["/bin/sh", "-c", 'test -r "$1" && test ! -w "$1" && test ! -w "$2"',
+                         "managed-reader", str(policy_path), str(policy_path.parent)],
+                        user=request["uid"], group=request["gid"], extra_groups=[],
+                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        timeout=5, check=False)
+                    assert reader.returncode == 0, "real isolated UID cannot read the Agent-created lease without write access"
+                    def policy_loop():
+                        while process.poll() is None:
+                            time.sleep(10)
+                            if process.poll() is not None:
+                                return
+                            try:
+                                renew_policy()
+                            except OSError:
+                                return
+                    threading.Thread(target=policy_loop, daemon=True).start()
                 agent_status = Path(f"/proc/{process.pid}/status").read_text()
                 assert any(line.split() == ["Umask:", "0077"] for line in agent_status.splitlines()), "real entrypoint restrictive umask missing"
                 release = json.loads(Path("/usr/local/share/hermes-lite/release.json").read_text())
@@ -123,7 +150,7 @@ def main():
                 assert capability == {
                     "contract_version": 2, "enabled": True,
                     "hermes_ref": release["hermes_ref"], "hermes_commit": release["hermes_commit"],
-                    "rpc_protocol": "hermes-jsonrpc-v1", "backend_mode": "dashboard", "auth_mode": "password-cookie",
+                    "rpc_protocol": "hermes-jsonrpc-v1", "backend_mode": "serve", "auth_mode": "password-cookie",
                     "artifacts_verified": True, "release_accepted": release["desktop_web_accepted"],
                     "payload_sha256": release["payload_sha256"],
                 }, "managed runtime compatibility or truthful release acceptance missing"
@@ -155,6 +182,9 @@ def main():
                 replacement = await_running(11, 2)
                 assert replacement["gateway_pid"] != pid and not Path(f"/proc/{pid}").exists(), "old generation survived replacement"
                 assert sentinel.read_text() == "preserve-me", "replacement lost workspace"
+                if os.environ.get("HERMES_TEAM_TEST_REDIS_URL"):
+                    from smoke_lite_team import exercise_team
+                    exercise_team(control, await_running, workspaces, keys)
                 control("/v1/drain", {"draining": True})
                 assert control("/v1/health")["status"] == "draining", "drain not reported"
                 control("/v1/gateways/" + second["gateway_id"], method="DELETE")

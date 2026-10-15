@@ -82,6 +82,11 @@ func desktopWebProxyConfig(cfg gateway.Config, req gateway.CreateGatewayRequest)
 		return "", nil, fmt.Errorf("invalid_control_ui_origin: missing or invalid Hermes control UI origin")
 	}
 	origin = strings.TrimSuffix(origin, "/")
+	if cfg.ProxyPolicyFile != "" {
+		// Managed peers are ephemeral lease state, never request-supplied or
+		// persisted in the instance config. The boundary reads the Agent file.
+		return origin, []string{}, nil
+	}
 	proxies := append([]string{}, cfg.TrustedProxies...)
 	if value, ok := requestEnvValue(req, "CLAWMANAGER_TRUSTED_PROXY_CIDRS"); ok {
 		proxies = strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ' ' || r == '\n' || r == '\t' })
@@ -160,6 +165,7 @@ func writeDesktopWebConfig(cfg gateway.Config, req gateway.CreateGatewayRequest,
 		"CUSTOM_BASE_URL":                           resolved.LLMBaseURL,
 		"HERMES_DASHBOARD_BASIC_AUTH_USERNAME":      username,
 		"HERMES_DASHBOARD_BASIC_AUTH_PASSWORD":      password,
+		"HERMES_DASHBOARD_BASIC_AUTH_SECRET":        dashboardSigningSecret(password),
 		"HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH": "",
 		"HERMES_DASHBOARD_PUBLIC_URL":               origin + basePath,
 	})

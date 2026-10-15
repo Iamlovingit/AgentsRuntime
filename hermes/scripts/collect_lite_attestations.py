@@ -46,7 +46,7 @@ def collect(oci, metadata_path, output):
                 predicate_type = statement["predicateType"]
                 if "spdx" in predicate_type:
                     name = statement["predicate"]["name"]
-                    if name not in {"sbom", "sbom-dashboard-builder"}:
+                    if name not in {"sbom", "sbom-session-worker-builder"}:
                         raise ValueError("Unexpected SBOM subject")
                     filename = name + ".spdx.json"
                 elif "slsa" in predicate_type:
@@ -56,7 +56,7 @@ def collect(oci, metadata_path, output):
                 if filename in records:
                     raise ValueError("Duplicate attestation")
                 records[filename] = statement
-        if set(records) != {"sbom.spdx.json", "sbom-dashboard-builder.spdx.json", "provenance.json"}:
+        if set(records) != {"sbom.spdx.json", "sbom-session-worker-builder.spdx.json", "provenance.json"}:
             raise ValueError("Missing runtime/bundled-dependency SBOM or provenance")
     output.mkdir(parents=True)
     summary = {"schema_version": 1, "candidate_image_digest": candidate,

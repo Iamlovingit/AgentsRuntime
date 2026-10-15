@@ -28,7 +28,7 @@ func TestDesktopWebEnvironmentWhitelistAndAuthoritativeIdentity(t *testing.T) {
 	req.Environment["NODE_OPTIONS"] = "--require /tmp/inject.js"
 	req.Environment["RUNTIME_AGENT_CONTROL_TOKEN"] = "request-control-secret"
 	req.Environment["UNDEFINED_ENV"] = "ignored"
-	req.Environment["CLAWMANAGER_HERMES_BACKEND_MODE"] = "serve"
+	req.Environment["CLAWMANAGER_HERMES_BACKEND_MODE"] = "dashboard"
 	cfg := gateway.Config{RuntimeType: "hermes", PublicOrigin: "https://manager.example", TrustedProxies: []string{"10.1.2.0/24"}, LLMAPIKey: "pod-llm-secret", GatewayToken: "pod-gateway-secret"}
 	env := p.GatewayEnv([]string{"PATH=/usr/bin:/bin", "RUNTIME_AGENT_REPORT_TOKEN=report-secret", "ANTHROPIC_API_KEY=pod-provider-secret", "HERMES_DASHBOARD_SESSION_TOKEN=pod-session-secret", "PYTHONPATH=/tmp/inject"}, cfg, req, req.WorkspacePath, 20000)
 	for _, key := range []string{"RUNTIME_AGENT_REPORT_TOKEN", "RUNTIME_AGENT_CONTROL_TOKEN", "ANTHROPIC_API_KEY", "HERMES_DASHBOARD_SESSION_TOKEN", "PYTHONPATH", "NODE_OPTIONS", "UNDEFINED_ENV"} {
@@ -36,7 +36,7 @@ func TestDesktopWebEnvironmentWhitelistAndAuthoritativeIdentity(t *testing.T) {
 			t.Errorf("forwarded %s", key)
 		}
 	}
-	for key, want := range map[string]string{"PATH": "/usr/bin:/bin", "HOME": filepath.Join(req.WorkspacePath, "home"), "PORT": "20000", desktopWebFlag: "true", "CLAWMANAGER_HERMES_BACKEND_MODE": "dashboard", "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD": "managed-auth", "OPENAI_API_KEY": "instance-model-key", "CLAWMANAGER_CONTROL_UI_ORIGIN": "https://manager.example", "CLAWMANAGER_TRUSTED_PROXY_CIDRS": "10.1.2.0/24"} {
+	for key, want := range map[string]string{"PATH": "/usr/bin:/bin", "HOME": filepath.Join(req.WorkspacePath, "home"), "PORT": "20000", desktopWebFlag: "true", "CLAWMANAGER_HERMES_BACKEND_MODE": "serve", "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD": "managed-auth", "OPENAI_API_KEY": "instance-model-key", "CLAWMANAGER_CONTROL_UI_ORIGIN": "https://manager.example", "CLAWMANAGER_TRUSTED_PROXY_CIDRS": "10.1.2.0/24"} {
 		if envValue(env, key) != want {
 			t.Errorf("wrong value for %s", key)
 		}
@@ -47,7 +47,7 @@ func TestDesktopWebEnvironmentWhitelistAndAuthoritativeIdentity(t *testing.T) {
 }
 func TestDesktopWebRejectsUnsupportedBackendBeforeWorkspaceMutation(t *testing.T) {
 	t.Setenv(desktopWebFlag, "true")
-	for _, mode := range []string{"serve", "invalid"} {
+	for _, mode := range []string{"dashboard", "invalid"} {
 		t.Run(mode, func(t *testing.T) {
 			t.Setenv("CLAWMANAGER_HERMES_BACKEND_MODE", mode)
 			root := t.TempDir()
@@ -65,7 +65,7 @@ func TestDesktopWebRejectsUnsupportedBackendBeforeWorkspaceMutation(t *testing.T
 
 func TestDesktopWebTeamUsesExistingTeamContractAlongsideDashboard(t *testing.T) {
 	t.Setenv(desktopWebFlag, "true")
-	t.Setenv("CLAWMANAGER_HERMES_BACKEND_MODE", "dashboard")
+	t.Setenv("CLAWMANAGER_HERMES_BACKEND_MODE", "serve")
 	root := t.TempDir()
 	req := strictTestRequest(root)
 	req.Environment["CLAWMANAGER_TEAM_ENABLED"] = "true"
@@ -148,7 +148,7 @@ func TestDesktopWebRejectsCredentialIntegerTruncationBeforePreparation(t *testin
 		t.Skip("large positive identities cannot be represented on this platform")
 	}
 	t.Setenv(desktopWebFlag, "true")
-	t.Setenv("CLAWMANAGER_HERMES_BACKEND_MODE", "dashboard")
+	t.Setenv("CLAWMANAGER_HERMES_BACKEND_MODE", "serve")
 	for _, raw := range []uint64{1<<32 - 1, 1 << 32, 1<<32 + 10001} {
 		for _, field := range []string{"uid", "gid"} {
 			t.Run(field+"-"+strconv.FormatUint(raw, 10), func(t *testing.T) {

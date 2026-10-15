@@ -27,11 +27,12 @@ SUITES = {
 }
 FIXED_FILES = [
     "/usr/local/bin/" + name for name in
-    ("clawmanager-agent", "start-hermes-lite-dashboard", "start-hermes-lite-runtime", "hermes-apply-runtime-config", "hermes-lite-entrypoint", "node", "python3.13")
+    ("clawmanager-agent", "start-hermes-lite-backend", "start-hermes-lite-runtime", "hermes-apply-runtime-config", "hermes-lite-entrypoint", "node", "python3.13")
 ] + ["/usr/local/lib/libpython3.13.so.1.0"] + [SHARE + "/" + name for name in (
     "source-lock.json", "verify_lite_release.py", "run_release_check.py", "run_campaign.py", "campaign_evidence.py",
     "campaign_signing.py", "verify_lite_promotion_oci.py", "verify_campaign_signature.mjs", "release-trust.json", "acceptance-protocol.json")]
 FIXED_FILES += [
+    "/usr/local/share/clawmanager/hermes-proxy-policy-v1",
     "/usr/local/share/clawmanager/hermes/skills/redis-team-protocol/SKILL.md",
     "/usr/local/share/clawmanager/hermes/skills/redis-team-protocol/skill.json",
 ]
@@ -39,16 +40,16 @@ MANDATORY = FIXED_FILES + ["/opt/hermes-agent/" + name for name in (
     "hermes_cli/web_server.py", "hermes_cli/runtime_provider.py", "hermes_cli/lite_gateway_boundary.py",
     "hermes_cli/lite_non_native.py", "hermes_cli/env_loader.py", "hermes_cli/lite_environment.py",
     "tui_gateway/server.py", "tui_gateway/methods_session.py",
-    "model_tools.py", "agent/tool_executor.py", "hermes_cli/web_dist/index.html", "hermes_cli/tui_dist/entry.js",
+    "model_tools.py", "agent/tool_executor.py", "hermes_cli/tui_dist/entry.js",
     ".venv/bin/hermes", "pyproject.toml", "uv.lock", "package-lock.json",
     "plugins/platforms/redis_team/adapter.py", "plugins/platforms/redis_team/plugin.yaml",
 )] + [SHARE + "/patches/" + name for name in (
-    "apply_lite_gateway_boundary.py", "lite_gateway_boundary.py", "apply_lite_non_native.py", "lite_non_native.py", "lite_environment.py", "apply_lite_tool_executor.py", "apply_team_completion_stop.py",
+    "apply_lite_gateway_boundary.py", "lite_gateway_boundary.py", "apply_lite_non_native.py", "lite_non_native.py", "lite_environment.py", "apply_lite_tool_executor.py", "apply_team_completion_stop.py", "apply_profile_external_skill_dedupe.py",
 )] + [SHARE + "/tests/" + name for name in (*SUITES.values(), "check_lite_tool_executor.py", "cm_bff_browser.mjs", "acceptance_model_stub.py")]
 ARTIFACT_TREES = ("/opt/hermes-agent", "/usr/local/lib/python3.13", SHARE + "/patches", SHARE + "/tests")
 HEX256 = re.compile(r"[0-9a-f]{64}")
-PATCH_FILES = {"apply_lite_gateway_boundary.py", "lite_gateway_boundary.py", "apply_lite_non_native.py", "lite_non_native.py", "lite_environment.py", "apply_lite_tool_executor.py", "apply_team_completion_stop.py"}
-TEST_FILES = set(SUITES.values()) | {"check_lite_tool_executor.py", "cm_bff_browser.mjs", "acceptance_model_stub.py"}
+PATCH_FILES = {"apply_lite_gateway_boundary.py", "lite_gateway_boundary.py", "apply_lite_non_native.py", "lite_non_native.py", "lite_environment.py", "apply_lite_tool_executor.py", "apply_team_completion_stop.py", "apply_profile_external_skill_dedupe.py"}
+TEST_FILES = set(SUITES.values()) | {"check_lite_tool_executor.py", "cm_bff_browser.mjs", "acceptance_model_stub.py", "smoke_lite_team.py"}
 
 
 def sha256_file(path):
@@ -114,7 +115,7 @@ def generate_release(lock, root="/", ownership=True):
     return {
         "schema_version": 2, "hermes_ref": lock["tag"], "hermes_commit": lock["commit"],
         "package_version": lock["package_version"], "node_version": lock["node_version"],
-        "contract_version": 1, "rpc_protocol": "hermes-jsonrpc-v1", "backend_mode": "dashboard",
+        "contract_version": 1, "rpc_protocol": "hermes-jsonrpc-v1", "backend_mode": "serve",
         "auth_mode": "password-cookie", "desktop_web_accepted": False,
         "artifacts": artifacts, "payload_sha256": payload_hash(artifacts),
     }
@@ -125,7 +126,7 @@ def verify_release(release, lock, root="/", require_accepted=False, ownership=Tr
             and release["schema_version"] == 2, "unsupported managed release schema")
     expected = {"hermes_ref": lock["tag"], "hermes_commit": lock["commit"],
                 "package_version": lock["package_version"], "node_version": lock["node_version"],
-                "contract_version": 1, "rpc_protocol": "hermes-jsonrpc-v1", "backend_mode": "dashboard",
+                "contract_version": 1, "rpc_protocol": "hermes-jsonrpc-v1", "backend_mode": "serve",
                 "auth_mode": "password-cookie"}
     require(all(type(release.get(key)) is type(value) and release[key] == value for key, value in expected.items()),
             "managed release identity mismatch")

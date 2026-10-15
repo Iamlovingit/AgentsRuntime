@@ -46,12 +46,16 @@ try {
   process.env.OPENCLAW_CONFIG_PATH = configPath;
   process.env.CLAWMANAGER_OPENCLAW_DOCTOR_MIGRATION = "1";
   const distRoot = "/usr/local/lib/node_modules/openclaw/dist";
+  const version = JSON.parse(fs.readFileSync("/usr/local/lib/node_modules/openclaw/package.json")).version;
   const migrationModules = fs.readdirSync(distRoot)
-    .filter((name) => /^exec-approvals-generated-migration-.*\.js$/.test(name));
+    .filter((name) => version === '2026.10.2'
+      ? /^exec-approvals-migration-gate-.*\.mjs$/.test(name) && fs.readFileSync(path.join(distRoot, name), 'utf8').includes('function assertNoPendingLegacyExecApprovals(')
+      : /^exec-approvals-generated-migration-.*\.js$/.test(name));
   assert.equal(migrationModules.length, 1);
   const execApprovalsStore = await import(pathToFileURL(path.join(distRoot, migrationModules[0])).href);
+  const checkStore = version === '2026.10.2' ? execApprovalsStore.n : execApprovalsStore.a;
   assert.throws(
-    () => execApprovalsStore.a(),
+    () => checkStore(),
     /Legacy exec approvals exist/,
     "ordinary store access must remain fail-closed even when the authority environment variable is present",
   );
@@ -62,7 +66,7 @@ try {
   assert.equal(repaired.status, 0, repaired.stderr || repaired.stdout);
   assert.equal(fs.existsSync(legacyPath), false, "Doctor must retire the verified legacy JSON");
   assert.equal(fs.existsSync(`${legacyPath}.doctor-importing`), false, "Doctor claim must not remain");
-  assert.doesNotThrow(() => execApprovalsStore.a(), "migrated exec approvals must be readable from SQLite");
+  assert.doesNotThrow(() => checkStore(), "migrated exec approvals must be readable from SQLite");
 
   const validated = command(["config", "validate", "--json"]);
   assert.equal(validated.status, 0, validated.stderr || validated.stdout);

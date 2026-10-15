@@ -53,6 +53,7 @@ type Config struct {
 	PublicOrigin          string
 	AllowedOrigins        []string
 	TrustedProxies        []string
+	ProxyPolicyFile       string
 	LLMBaseURL            string
 	LLMAPIKey             string
 	LLMAPIKeySet          bool

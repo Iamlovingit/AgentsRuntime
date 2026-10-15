@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,20 +27,26 @@ import (
 var safeUpgradeID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 type WorkspaceUpgradeRequest struct {
-	RolloutID             string `json:"rollout_id"`
-	SnapshotID            string `json:"snapshot_id,omitempty"`
-	InstanceID            int    `json:"instance_id"`
-	UserID                int    `json:"user_id"`
-	Generation            int    `json:"generation"`
-	LeaseToken            string `json:"lease_token,omitempty"`
-	OfficialDBCheck       bool   `json:"official_database_check,omitempty"`
-	PreserveSessionSQLite bool   `json:"preserve_session_sqlite,omitempty"`
-	UID                   int    `json:"uid,omitempty"`
-	GID                   int    `json:"gid,omitempty"`
+	RolloutID               string `json:"rollout_id"`
+	SnapshotID              string `json:"snapshot_id,omitempty"`
+	InstanceID              int    `json:"instance_id"`
+	UserID                  int    `json:"user_id"`
+	Generation              int    `json:"generation"`
+	LeaseToken              string `json:"lease_token,omitempty"`
+	OfficialDBCheck         bool   `json:"official_database_check,omitempty"`
+	PreserveSessionSQLite   bool   `json:"preserve_session_sqlite,omitempty"`
+	UID                     int    `json:"uid,omitempty"`
+	GID                     int    `json:"gid,omitempty"`
+	RecoveryMode            string `json:"recovery_mode,omitempty"`
+	ResumeRolloutID         string `json:"resume_rollout_id,omitempty"`
+	ResumeGeneration        int    `json:"resume_generation,omitempty"`
+	ManagedPluginPlanSHA256 string `json:"managed_plugin_plan_sha256,omitempty"`
 }
 
 type SessionSQLiteMigrationResult struct {
 	InstanceID           int              `json:"instance_id"`
+	RolloutID            string           `json:"rollout_id,omitempty"`
+	Generation           int              `json:"generation,omitempty"`
 	Status               string           `json:"status"`
 	OutputSHA256         string           `json:"output_sha256"`
 	ArchiveBytes         int64            `json:"archive_bytes"`
@@ -52,6 +59,8 @@ type SessionSQLiteMigrationResult struct {
 	SessionCatalogSHA256 string           `json:"session_catalog_sha256,omitempty"`
 	PhaseDurationsMS     map[string]int64 `json:"phase_durations_ms,omitempty"`
 	CompletedAt          time.Time        `json:"completed_at"`
+	DataPreserved        bool             `json:"data_preserved,omitempty"`
+	PreservationSHA256   string           `json:"preservation_sha256,omitempty"`
 }
 
 type openClawSessionCatalog struct {
@@ -63,6 +72,8 @@ type openClawSessionCatalog struct {
 
 type SessionSQLiteRestoreResult struct {
 	InstanceID             int              `json:"instance_id"`
+	RolloutID              string           `json:"rollout_id,omitempty"`
+	Generation             int              `json:"generation,omitempty"`
 	Status                 string           `json:"status"`
 	OutputSHA256           string           `json:"output_sha256"`
 	ConfigRestored         bool             `json:"config_restored"`
@@ -73,19 +84,20 @@ type SessionSQLiteRestoreResult struct {
 }
 
 type UpgradeCompatibilityResult struct {
-	InstanceID           int       `json:"instance_id"`
-	Status               string    `json:"status"`
-	ConfigOriginalSHA256 string    `json:"config_original_sha256"`
-	ConfigTargetSHA256   string    `json:"config_target_sha256"`
-	ConfigBytes          int64     `json:"config_bytes"`
-	SessionBytes         int64     `json:"session_bytes"`
-	StateBytes           int64     `json:"state_bytes"`
-	AvailableBytes       uint64    `json:"available_bytes"`
-	ConfigValidated      bool      `json:"config_validated"`
-	DoctorValidated      bool      `json:"doctor_validated"`
-	SessionDryRunValid   bool      `json:"session_dry_run_valid"`
-	ProbeOutputSHA256    string    `json:"probe_output_sha256"`
-	CheckedAt            time.Time `json:"checked_at"`
+	ManagedPluginPlanSHA256 string    `json:"managed_plugin_plan_sha256,omitempty"`
+	InstanceID              int       `json:"instance_id"`
+	Status                  string    `json:"status"`
+	ConfigOriginalSHA256    string    `json:"config_original_sha256"`
+	ConfigTargetSHA256      string    `json:"config_target_sha256"`
+	ConfigBytes             int64     `json:"config_bytes"`
+	SessionBytes            int64     `json:"session_bytes"`
+	StateBytes              int64     `json:"state_bytes"`
+	AvailableBytes          uint64    `json:"available_bytes"`
+	ConfigValidated         bool      `json:"config_validated"`
+	DoctorValidated         bool      `json:"doctor_validated"`
+	SessionDryRunValid      bool      `json:"session_dry_run_valid"`
+	ProbeOutputSHA256       string    `json:"probe_output_sha256"`
+	CheckedAt               time.Time `json:"checked_at"`
 }
 
 type upgradeConfigCapsule struct {
@@ -157,13 +169,25 @@ func (m *GatewayManager) PreflightUpgradeCompatibility(ctx context.Context, req 
 		}
 	}
 	openclawcompat.Normalize81(config)
+	if m.cfg.OpenClawVersion == "2026.10.2" {
+		plan, err := planManagedPlugins(filepath.Join(workspace, "home/.openclaw"), "/defaults/.openclaw")
+		if err != nil {
+			return result, err
+		}
+		result.ManagedPluginPlanSHA256 = plan.SHA256
+	}
 	probeRoot, probeHome, stateBytes, err := m.createUpgradeCompatibilityProbe(workspace, config, req)
 	if err != nil {
 		return result, err
 	}
-	defer removeUpgradeProbe(probeRoot)
+	defer m.removeUpgradeProbe(probeRoot)
 	probeConfigPath := filepath.Join(probeHome, ".openclaw", "openclaw.json")
 	probeHash := sha256.New()
+	if m.cfg.OpenClawVersion == "2026.10.2" {
+		if err := runOpenClawCommandInHome(ctx, probeRoot, probeHome, probeConfigPath, req, "probe-plugin-metadata", []string{filepath.Join(workspace, "home", ".openclaw"), filepath.Join(probeHome, ".openclaw")}, probeHash, 2*time.Minute); err != nil {
+			return result, err
+		}
+	}
 	if err := runOpenClawDoctorRepair(ctx, probeRoot, probeHome, probeConfigPath, req, probeHash); err != nil {
 		if errors.Is(err, errUpgradeProbeBusy) {
 			result.Status = "deferred"
@@ -206,14 +230,16 @@ func (m *GatewayManager) PreflightUpgradeCompatibility(ctx context.Context, req 
 }
 
 func (m *GatewayManager) createUpgradeCompatibilityProbe(workspace string, sourceConfig map[string]any, req WorkspaceUpgradeRequest) (string, string, int64, error) {
-	probeRoot, err := os.MkdirTemp("", fmt.Sprintf("clawmanager-upgrade-%d-", req.InstanceID))
+	// Rehearse on the instance filesystem, not a local /tmp overlay that hides
+	// NFS publication failures. The fresh private directory is outside HOME.
+	probeRoot, err := os.MkdirTemp(workspace, fmt.Sprintf("clawmanager-upgrade-%d-", req.InstanceID))
 	if err != nil {
 		return "", "", 0, err
 	}
 	ok := false
 	defer func() {
 		if !ok {
-			removeUpgradeProbe(probeRoot)
+			m.removeUpgradeProbe(probeRoot)
 		}
 	}()
 	probeHome := filepath.Join(probeRoot, "home")
@@ -235,6 +261,12 @@ func (m *GatewayManager) createUpgradeCompatibilityProbe(workspace string, sourc
 		return "", "", 0, err
 	}
 	workspaceCopies := remapProbeWorkspacePaths(probeConfig, probeOpenClaw)
+	// Session/Agent database paths can be absolute even within the managed HOME.
+	// Preserve their layout in the cloned state instead of letting Doctor's
+	// isolated HOME still refer to the live writer-owned database.
+	if err := remapProbeControlPaths(probeConfig, filepath.Join(workspace, "home", ".openclaw"), probeOpenClaw); err != nil {
+		return "", "", 0, err
+	}
 	workspaceCopies[filepath.Join(workspace, "home", ".openclaw", "workspace")] = filepath.Join(probeOpenClaw, "workspace")
 	probeConfigRaw, err := json.MarshalIndent(probeConfig, "", "  ")
 	if err != nil {
@@ -295,6 +327,23 @@ func (m *GatewayManager) createUpgradeCompatibilityProbe(workspace string, sourc
 			if isControl || isSession {
 				return fmt.Errorf("upgrade probe input %s is a symlink", slash)
 			}
+			if isSupport {
+				resolved, err := upgradePluginLink(path, sourceOpenClaw)
+				if err != nil {
+					return fmt.Errorf("resolve probe plugin link %s: %w", slash, err)
+				}
+				target := resolved
+				if pathWithin(sourceOpenClaw, resolved) {
+					relative, err := filepath.Rel(sourceOpenClaw, resolved)
+					if err != nil {
+						return err
+					}
+					target = filepath.Join(probeOpenClaw, relative)
+				} else if !pathWithin("/defaults/.openclaw", resolved) && !pathWithin("/usr/local/lib/node_modules/openclaw", resolved) {
+					return fmt.Errorf("upgrade probe plugin link %s leaves managed and image-owned roots", slash)
+				}
+				return os.Symlink(target, filepath.Join(probeOpenClaw, rel))
+			}
 			return nil
 		}
 		info, infoErr := entry.Info()
@@ -313,7 +362,14 @@ func (m *GatewayManager) createUpgradeCompatibilityProbe(workspace string, sourc
 		stateBytes += info.Size()
 		return nil
 	})
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err != nil {
+		return "", "", 0, err
+	}
+	if req.RecoveryMode == "rebuild" || m.cfg.OpenClawVersion == "2026.10.2" {
+		if err := rebuildImageManagedPlugins(probeOpenClaw, "/defaults/.openclaw"); err != nil {
+			return "", "", 0, err
+		}
+	} else if err := validateUpgradePluginLinks(probeOpenClaw); err != nil {
 		return "", "", 0, err
 	}
 	for source, target := range workspaceCopies {
@@ -374,6 +430,104 @@ func remapProbeWorkspacePaths(config map[string]any, probeOpenClaw string) map[s
 	return copies
 }
 
+func remapProbeControlPaths(config map[string]any, sourceState, probeState string) error {
+	remap := func(raw string) (string, error) {
+		resolved := strings.TrimSpace(raw)
+		if resolved == "" {
+			return raw, nil
+		}
+		if strings.HasPrefix(resolved, "~/") || strings.HasPrefix(resolved, "~\\") {
+			resolved = filepath.Join(filepath.Dir(sourceState), resolved[2:])
+		} else if !filepath.IsAbs(resolved) {
+			// Native resolveUserPath uses cwd for non-tilde relative paths.
+			// Upgrade commands run from the instance workspace, not HOME.
+			resolved = filepath.Join(filepath.Dir(filepath.Dir(sourceState)), resolved)
+		}
+		resolved = filepath.Clean(resolved)
+		if !pathWithin(sourceState, resolved) {
+			return "", errors.New("upgrade preflight cannot isolate configured control state outside the persistent .openclaw directory")
+		}
+		rel, err := filepath.Rel(sourceState, resolved)
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(probeState, rel), nil
+	}
+	var walk func(any) error
+	walk = func(value any) error {
+		switch typed := value.(type) {
+		case map[string]any:
+			for key, child := range typed {
+				if key == "agentDir" {
+					if raw, ok := child.(string); ok {
+						mapped, err := remap(raw)
+						if err != nil {
+							return err
+						}
+						typed[key] = mapped
+					}
+				} else if err := walk(child); err != nil {
+					return err
+				}
+			}
+		case []any:
+			for _, child := range typed {
+				if err := walk(child); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	if err := walk(config["agents"]); err != nil {
+		return err
+	}
+	if session, ok := config["session"].(map[string]any); ok {
+		if raw, ok := session["store"].(string); ok {
+			mapped, err := remap(raw)
+			if err != nil {
+				return err
+			}
+			session["store"] = mapped
+		}
+	}
+	if plugins, ok := config["plugins"].(map[string]any); ok {
+		remapPlugin := func(raw string) (string, error) {
+			if strings.HasPrefix(filepath.ToSlash(raw), "/") && (pathWithin("/defaults/.openclaw", raw) || pathWithin("/usr/local/lib/node_modules/openclaw", raw)) {
+				return raw, nil
+			}
+			return remap(raw)
+		}
+		if load, ok := plugins["load"].(map[string]any); ok {
+			if paths, ok := load["paths"].([]any); ok {
+				for i, value := range paths {
+					if raw, ok := value.(string); ok {
+						mapped, err := remapPlugin(raw)
+						if err != nil {
+							return err
+						}
+						paths[i] = mapped
+					}
+				}
+			}
+		}
+		if installs, ok := plugins["installs"].(map[string]any); ok {
+			for _, value := range installs {
+				if record, ok := value.(map[string]any); ok {
+					if raw, ok := record["installPath"].(string); ok {
+						mapped, err := remapPlugin(raw)
+						if err != nil {
+							return err
+						}
+						record["installPath"] = mapped
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func copyRegularFileStable(source, target string, mode os.FileMode) error {
 	for attempt := 0; attempt < 3; attempt++ {
 		before, err := os.Lstat(source)
@@ -403,6 +557,9 @@ func chownTree(root string, uid, gid int) error {
 		if walkErr != nil {
 			return walkErr
 		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
 		return ChownWorkspace(path, uid, gid)
 	})
 }
@@ -411,6 +568,13 @@ func removeUpgradeProbe(path string) {
 	clean := filepath.Clean(path)
 	base := filepath.Clean(os.TempDir())
 	if strings.HasPrefix(filepath.Base(clean), "clawmanager-upgrade-") && pathWithin(base, clean) {
+		_ = os.RemoveAll(clean)
+	}
+}
+
+func (m *GatewayManager) removeUpgradeProbe(path string) {
+	clean := filepath.Clean(path)
+	if strings.HasPrefix(filepath.Base(clean), "clawmanager-upgrade-") && clean != m.cfg.WorkspaceRoot && pathWithin(m.cfg.WorkspaceRoot, clean) {
 		_ = os.RemoveAll(clean)
 	}
 }
@@ -432,11 +596,32 @@ func runOpenClawCommandInHome(ctx context.Context, dir, home, configPath string,
 		}
 	}
 	cmd := exec.CommandContext(phaseCtx, "openclaw", args...)
+	if phase == "probe-plugin-metadata" {
+		cmd = exec.CommandContext(phaseCtx, "node", append([]string{"/usr/local/share/openclaw/patches/isolate_upgrade_plugin_metadata_102.mjs"}, args...)...)
+	}
+	if phase == "managed-plugin-metadata" {
+		cmd = exec.CommandContext(phaseCtx, "node", "/usr/local/share/openclaw/patches/converge_plugin_records_102.mjs")
+	}
 	cmd.Dir = dir
 	overrides := map[string]string{
 		"HOME": home, "OPENCLAW_STATE_DIR": stateDir, "OPENCLAW_CONFIG_PATH": configPath,
 		"TMPDIR": scratchRoot, "XDG_CACHE_HOME": cacheRoot,
 		"XDG_STATE_HOME": xdgStateRoot, "NO_COLOR": "1",
+		"OPENCLAW_NO_RESPAWN": "1",
+	}
+	// Plugin generation copies can be large and exist only for this command.
+	// Keep durable captures/config/history on their original NFS filesystem.
+	// The pinned core overlay admits only this UID-owned, private local root.
+	if runtime.GOOS == "linux" {
+		pluginScratch, err := os.MkdirTemp("/tmp", "clawmanager-upgrade-plugin-")
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(pluginScratch)
+		if err := ChownWorkspace(pluginScratch, req.UID, req.GID); err != nil {
+			return err
+		}
+		overrides["CLAWMANAGER_OPENCLAW_UPGRADE_PLUGIN_CAPTURE_ROOT"] = pluginScratch
 	}
 	// OpenClaw 2026.8.1 otherwise asks Doctor to migrate legacy exec
 	// approvals while blocking Doctor itself at the same migration gate.  The
@@ -447,6 +632,9 @@ func runOpenClawCommandInHome(ctx context.Context, dir, home, configPath string,
 	}
 	cmd.Env = upgradeCommandEnv(overrides)
 	configureGatewayCommand(cmd, req.UID, req.GID)
+	inheritUpgradeOperationFence(ctx, cmd)
+	cleanup := fenceUpgradeCommand(cmd)
+	defer cleanup()
 	output, runErr := cmd.CombinedOutput()
 	if len(output) > 64*1024 {
 		output = output[:64*1024]
@@ -486,6 +674,11 @@ func containsArgument(args []string, wanted string) bool {
 // of Doctor-owned state.  A retry is allowed only when durable migration
 // inputs changed; a repeated failure with the same fingerprint fails closed.
 func runOpenClawDoctorRepair(ctx context.Context, dir, home, configPath string, req WorkspaceUpgradeRequest, hash io.Writer) error {
+	if _, err := os.Stat(filepath.Join(home, ".openclaw/.clawmanager-plugin-convergence.json")); err == nil {
+		if err := runOpenClawCommandInHome(ctx, dir, home, configPath, req, "managed-plugin-metadata", nil, hash, 2*time.Minute); err != nil {
+			return err
+		}
+	}
 	const maxPasses = 4
 	before, err := openClawDoctorMigrationFingerprint(home, configPath)
 	if err != nil {
@@ -584,8 +777,8 @@ func upgradeCommandEnv(overrides map[string]string) []string {
 // MigrateSessionSQLite executes OpenClaw's public, transactional migration
 // workflow against the fixed persistent HOME. It is only callable while the
 // gateway is stopped and the control plane owns the workspace writer lease.
-func (m *GatewayManager) MigrateSessionSQLite(ctx context.Context, req WorkspaceUpgradeRequest) (SessionSQLiteMigrationResult, error) {
-	result := SessionSQLiteMigrationResult{InstanceID: req.InstanceID, PhaseDurationsMS: map[string]int64{}}
+func (m *GatewayManager) MigrateSessionSQLite(ctx context.Context, req WorkspaceUpgradeRequest) (result SessionSQLiteMigrationResult, resultErr error) {
+	result = SessionSQLiteMigrationResult{InstanceID: req.InstanceID, RolloutID: req.RolloutID, Generation: req.Generation, PhaseDurationsMS: map[string]int64{}}
 	if err := validateUpgradeID("rollout_id", req.RolloutID); err != nil {
 		return result, err
 	}
@@ -593,33 +786,76 @@ func (m *GatewayManager) MigrateSessionSQLite(ctx context.Context, req Workspace
 	if err != nil {
 		return result, err
 	}
+	unlock, err := m.lockUpgradeOperation(req.InstanceID)
+	if err != nil {
+		return result, err
+	}
+	defer unlock()
+	ctx = m.upgradeOperationContext(ctx, req.InstanceID)
 	if !IsOpenClawAtLeast(m.cfg.OpenClawVersion, OpenClaw81Version) {
 		return result, fmt.Errorf("OpenClaw %s does not support session SQLite migration", m.cfg.OpenClawVersion)
 	}
 	if m.InstanceActive(req.InstanceID) {
 		return result, fmt.Errorf("instance %d still has an active gateway", req.InstanceID)
 	}
-	if _, err := m.requireWriterLease(req); err != nil {
+	ctx, finishLease, err := m.keepUpgradeWriterLease(ctx, req)
+	if err != nil {
 		return result, err
 	}
+	defer func() { resultErr = errors.Join(resultErr, finishLease()) }()
 	if req.UID <= 0 || req.GID <= 0 {
 		return result, errors.New("positive uid and gid are required for session migration")
 	}
 	receiptPath := m.sessionMigrationReceiptPath(req)
 	if raw, readErr := os.ReadFile(receiptPath); readErr == nil {
-		if jsonErr := json.Unmarshal(raw, &result); jsonErr == nil && result.InstanceID == req.InstanceID && result.Status == "validated" {
-			return result, nil
+		var existing SessionSQLiteMigrationResult
+		if json.Unmarshal(raw, &existing) != nil || !sessionMigrationReceiptMatches(existing, req) {
+			return result, errors.New("migration receipt belongs to another execution or is invalid")
 		}
+		if existing.Status == "validated" {
+			return existing, nil
+		}
+	} else if !errors.Is(readErr, os.ErrNotExist) {
+		return result, readErr
 	}
 	home := filepath.Join(workspace, "home")
 	if info, err := os.Stat(home); err != nil || !info.IsDir() {
 		return result, fmt.Errorf("persistent HOME is unavailable: %w", err)
 	}
+	plan, planErr := planManagedPlugins(filepath.Join(home, ".openclaw"), "/defaults/.openclaw")
+	if planErr != nil {
+		return result, planErr
+	}
+	if req.ManagedPluginPlanSHA256 != "" && req.ManagedPluginPlanSHA256 != plan.SHA256 {
+		return result, errors.New("OPENCLAW_PLUGIN_PLAN_CHANGED: plugin inputs changed since compatibility preflight")
+	}
+	// Preserve original control/plugin state BEFORE installing any repaired candidate.
 	stateCapsule, err := m.prepareOpenClawStateCapsule(workspace, req)
 	if err != nil {
 		return result, err
 	}
 	result.StateCapsuleBytes = stateCapsule.TotalBytes
+	if req.RecoveryMode == "rebuild" || (m.cfg.OpenClawVersion == "2026.10.2" && len(plan.Changes) > 0) {
+		if err := m.verifyUpgradeWriter(ctx, req); err != nil {
+			return result, err
+		}
+		proof, err := m.rebuildPreservingState(ctx, workspace, req)
+		if err != nil {
+			return result, err
+		}
+		result.DataPreserved, result.PreservationSHA256 = proof.Installed, proof.OriginalSHA256
+	} else if req.RecoveryMode != "" && req.RecoveryMode != "retry" {
+		return result, errors.New("unsupported upgrade recovery action")
+	}
+	// Inspect the current validated state before preparing/normalizing config.
+	// A forward retry must preserve legitimate writes since the prior migration.
+	if req.RecoveryMode == "retry" && req.ResumeRolloutID != "" {
+		if reused, ok, err := m.resumeValidatedMigration(ctx, workspace, req, result); err != nil {
+			return result, err
+		} else if ok {
+			return reused, nil
+		}
+	}
 	capsule, err := m.prepareOpenClaw81Config(workspace, req)
 	if err != nil {
 		return result, err
@@ -653,6 +889,9 @@ func (m *GatewayManager) MigrateSessionSQLite(ctx context.Context, req Workspace
 	}
 	result.PhaseDurationsMS["config_validate"] = time.Since(phaseStarted).Milliseconds()
 	for _, args := range sessionSQLiteMigrationCommands() {
+		if err := m.verifyUpgradeWriter(ctx, req); err != nil {
+			return result, err
+		}
 		phase := args[2]
 		phaseStarted = time.Now()
 		if err := runOpenClawUpgradeCommand(ctx, workspace, home, req, phase, args, hash); err != nil {
@@ -687,6 +926,9 @@ func (m *GatewayManager) MigrateSessionSQLite(ctx context.Context, req Workspace
 		}
 		return result, err
 	}
+	if err := m.verifyUpgradeWriter(ctx, req); err != nil {
+		return result, err
+	}
 	result.CompletedAt = time.Now().UTC()
 	if err := writeSessionMigrationReceipt(receiptPath, result); err != nil {
 		return result, err
@@ -712,10 +954,14 @@ func (m *GatewayManager) SessionSQLiteMigrationStatus(req WorkspaceUpgradeReques
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return result, fmt.Errorf("invalid session migration receipt: %w", err)
 	}
-	if result.InstanceID != req.InstanceID || strings.TrimSpace(result.Status) == "" {
+	if !sessionMigrationReceiptMatches(result, req) || strings.TrimSpace(result.Status) == "" {
 		return result, errors.New("session migration receipt identity is invalid")
 	}
 	return result, nil
+}
+
+func sessionMigrationReceiptMatches(result SessionSQLiteMigrationResult, req WorkspaceUpgradeRequest) bool {
+	return result.InstanceID == req.InstanceID && (result.RolloutID == "" || result.RolloutID == req.RolloutID) && (result.Generation == 0 || result.Generation == req.Generation)
 }
 
 func inspectOfficialSessionCatalog(ctx context.Context, workspace, home string, req WorkspaceUpgradeRequest) (int, string, error) {
@@ -729,7 +975,10 @@ func inspectOfficialSessionCatalog(ctx context.Context, workspace, home string, 
 		"OPENCLAW_CONFIG_PATH": filepath.Join(stateDir, "openclaw.json"), "NO_COLOR": "1",
 	})
 	configureGatewayCommand(cmd, req.UID, req.GID)
+	inheritUpgradeOperationFence(ctx, cmd)
 	var stdout, stderr bytes.Buffer
+	cleanup := fenceUpgradeCommand(cmd)
+	defer cleanup()
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
@@ -818,8 +1067,8 @@ func (m *GatewayManager) sessionRestoreReceiptPath(req WorkspaceUpgradeRequest) 
 // RestoreSessionSQLite invokes OpenClaw's supported rollback workflow. It only
 // restores the upstream migration archive; project files and the rest of the
 // persistent workspace are never copied or replaced.
-func (m *GatewayManager) RestoreSessionSQLite(ctx context.Context, req WorkspaceUpgradeRequest) (SessionSQLiteRestoreResult, error) {
-	result := SessionSQLiteRestoreResult{InstanceID: req.InstanceID, PhaseDurationsMS: map[string]int64{}}
+func (m *GatewayManager) RestoreSessionSQLite(ctx context.Context, req WorkspaceUpgradeRequest) (result SessionSQLiteRestoreResult, resultErr error) {
+	result = SessionSQLiteRestoreResult{InstanceID: req.InstanceID, RolloutID: req.RolloutID, Generation: req.Generation, PhaseDurationsMS: map[string]int64{}}
 	if err := validateUpgradeID("rollout_id", req.RolloutID); err != nil {
 		return result, err
 	}
@@ -827,23 +1076,35 @@ func (m *GatewayManager) RestoreSessionSQLite(ctx context.Context, req Workspace
 	if err != nil {
 		return result, err
 	}
+	unlock, err := m.lockUpgradeOperation(req.InstanceID)
+	if err != nil {
+		return result, err
+	}
+	defer unlock()
+	ctx = m.upgradeOperationContext(ctx, req.InstanceID)
 	if !IsOpenClawAtLeast(m.cfg.OpenClawVersion, OpenClaw81Version) {
 		return result, fmt.Errorf("OpenClaw %s does not support session SQLite restore", m.cfg.OpenClawVersion)
 	}
 	if m.InstanceActive(req.InstanceID) {
 		return result, fmt.Errorf("instance %d still has an active gateway", req.InstanceID)
 	}
-	if _, err := m.requireWriterLease(req); err != nil {
+	ctx, finishLease, err := m.keepUpgradeWriterLease(ctx, req)
+	if err != nil {
 		return result, err
 	}
+	defer func() { resultErr = errors.Join(resultErr, finishLease()) }()
 	if req.UID <= 0 || req.GID <= 0 {
 		return result, errors.New("positive uid and gid are required for session restore")
 	}
 	receiptPath := m.sessionRestoreReceiptPath(req)
 	if raw, readErr := os.ReadFile(receiptPath); readErr == nil {
-		if jsonErr := json.Unmarshal(raw, &result); jsonErr == nil && sessionRestoreReceiptMatches(result, req) {
-			return result, nil
+		var existing SessionSQLiteRestoreResult
+		if json.Unmarshal(raw, &existing) != nil || !sessionRestoreReceiptMatches(existing, req) {
+			return result, errors.New("restore receipt belongs to another execution or is invalid")
 		}
+		return existing, nil
+	} else if !errors.Is(readErr, os.ErrNotExist) {
+		return result, readErr
 	}
 	migration := SessionSQLiteMigrationResult{}
 	raw, migrationReadErr := os.ReadFile(m.sessionMigrationReceiptPath(req))
@@ -870,12 +1131,18 @@ func (m *GatewayManager) RestoreSessionSQLite(ctx context.Context, req Workspace
 		result.PhaseDurationsMS["session_restore"] = time.Since(phaseStarted).Milliseconds()
 	}
 	phaseStarted := time.Now()
+	if err := m.verifyUpgradeWriter(ctx, req); err != nil {
+		return result, err
+	}
 	configRestored, configErr := m.restoreOpenClawConfig(workspace, req)
 	result.PhaseDurationsMS["config_restore"] = time.Since(phaseStarted).Milliseconds()
 	if configErr != nil {
 		return result, configErr
 	}
 	phaseStarted = time.Now()
+	if err := m.verifyUpgradeWriter(ctx, req); err != nil {
+		return result, err
+	}
 	stateRestored, stateErr := m.restoreOpenClawStateCapsule(workspace, req)
 	result.PhaseDurationsMS["state_restore"] = time.Since(phaseStarted).Milliseconds()
 	if stateErr != nil {
@@ -885,6 +1152,9 @@ func (m *GatewayManager) RestoreSessionSQLite(ctx context.Context, req Workspace
 		return result, errors.New("upgrade rollback capsule is unavailable")
 	}
 	result.Status = "restored"
+	if err := m.verifyUpgradeWriter(ctx, req); err != nil {
+		return result, err
+	}
 	result.OutputSHA256 = hex.EncodeToString(hash.Sum(nil))
 	result.ConfigRestored = configRestored
 	result.StateRestored = stateRestored
@@ -901,7 +1171,7 @@ func (m *GatewayManager) RestoreSessionSQLite(ctx context.Context, req Workspace
 }
 
 func sessionRestoreReceiptMatches(result SessionSQLiteRestoreResult, req WorkspaceUpgradeRequest) bool {
-	return result.InstanceID == req.InstanceID && result.Status == "restored" && result.PreservedSessionSQLite == req.PreserveSessionSQLite
+	return result.InstanceID == req.InstanceID && (result.RolloutID == "" || result.RolloutID == req.RolloutID) && (result.Generation == 0 || result.Generation == req.Generation) && result.Status == "restored" && result.PreservedSessionSQLite == req.PreserveSessionSQLite
 }
 
 // SessionSQLiteRestoreStatus is the read-only counterpart of restore. It is
@@ -921,7 +1191,7 @@ func (m *GatewayManager) SessionSQLiteRestoreStatus(req WorkspaceUpgradeRequest)
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return result, fmt.Errorf("invalid session restore receipt: %w", err)
 	}
-	if result.InstanceID != req.InstanceID || strings.TrimSpace(result.Status) == "" {
+	if !sessionRestoreReceiptMatches(result, req) {
 		return result, errors.New("session restore receipt identity is invalid")
 	}
 	return result, nil
@@ -933,20 +1203,32 @@ func runOpenClawUpgradeCommand(ctx context.Context, workspace, home string, req 
 
 func safeOpenClawFailureSummary(output []byte) string {
 	var safe []string
+	// Doctor wraps plugin failures in a box. The reason is on the following
+	// indented line and often contains no "error" keyword of its own.
+	continuations := 0
 	for _, line := range strings.Split(string(output), "\n") {
+		boxed := strings.HasPrefix(strings.TrimSpace(line), "│")
 		line = strings.TrimSpace(line)
+		line = strings.TrimSpace(strings.Trim(line, "│"))
 		lower := strings.ToLower(line)
-		if line == "" || (!strings.Contains(lower, "error") && !strings.Contains(lower, "failed") && !strings.Contains(lower, "reason") && !strings.Contains(lower, "unrecognized key") && !strings.Contains(lower, "invalid config") && !strings.Contains(lower, "config validation failed") && !strings.Contains(lower, "schema migration") && !strings.Contains(lower, "migration required") && !strings.Contains(lower, "legacy exec approvals") && !strings.Contains(lower, "legacy agent database") && !strings.Contains(lower, "database is locked") && !strings.Contains(lower, "sqlite_busy") && !strings.Contains(lower, "transcript_malformed") && !strings.Contains(lower, "transcript_missing")) {
+		matches := strings.Contains(lower, "error") || strings.Contains(lower, "failed") || strings.Contains(lower, "reason") || strings.Contains(lower, "unrecognized key") || strings.Contains(lower, "invalid config") || strings.Contains(lower, "config validation failed") || strings.Contains(lower, "schema migration") || strings.Contains(lower, "migration required") || strings.Contains(lower, "legacy exec approvals") || strings.Contains(lower, "legacy agent database") || strings.Contains(lower, "database is locked") || strings.Contains(lower, "sqlite_busy") || strings.Contains(lower, "transcript_malformed") || strings.Contains(lower, "transcript_missing")
+		if line == "" || (!matches && !(boxed && continuations > 0)) {
+			continuations = 0
 			continue
+		}
+		if matches && strings.Contains(lower, "post-core payload smoke check") {
+			continuations = 3
+		} else if continuations > 0 {
+			continuations--
 		}
 		line = regexp.MustCompile(`/[^ ]+`).ReplaceAllString(line, "<path>")
 		line = regexp.MustCompile(`(?i)(token|password|secret)([=: ]+)[^,; ]+`).ReplaceAllString(line, "$1$2<redacted>")
 		line = regexp.MustCompile(`\b[0-9a-fA-F]{40,}\b`).ReplaceAllString(line, "<digest>")
-		if len(line) > 240 {
-			line = line[:240]
+		if len([]rune(line)) > 480 {
+			line = string([]rune(line)[:480])
 		}
 		safe = append(safe, line)
-		if len(safe) == 4 {
+		if len(safe) == 12 {
 			break
 		}
 	}
@@ -1099,7 +1381,7 @@ func (m *GatewayManager) prepareOpenClawStateCapsule(workspace string, req Works
 	manifestPath := filepath.Join(dir, "state-capsule.json")
 	if raw, err := os.ReadFile(manifestPath); err == nil {
 		var existing upgradeStateCapsule
-		if json.Unmarshal(raw, &existing) != nil || existing.InstanceID != req.InstanceID || (existing.SchemaVersion != 1 && existing.SchemaVersion != 2) {
+		if json.Unmarshal(raw, &existing) != nil || existing.InstanceID != req.InstanceID || existing.SchemaVersion < 1 || existing.SchemaVersion > 3 {
 			return upgradeStateCapsule{}, errors.New("invalid existing OpenClaw state upgrade capsule")
 		}
 		return existing, nil
@@ -1109,13 +1391,16 @@ func (m *GatewayManager) prepareOpenClawStateCapsule(workspace string, req Works
 	}
 	openClawDir := filepath.Join(workspace, "home", ".openclaw")
 	capsule := upgradeStateCapsule{SchemaVersion: 2, InstanceID: req.InstanceID, WorkspaceFiles: map[string]bool{}, ControlDirs: map[string]bool{}, ControlFiles: map[string]upgradeStateCapsuleFile{}}
+	if m.cfg.OpenClawVersion == "2026.10.2" {
+		capsule.SchemaVersion = 3
+	}
 	entries, readErr := os.ReadDir(openClawDir)
 	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 		return upgradeStateCapsule{}, readErr
 	}
 	for _, entry := range entries {
 		name := entry.Name()
-		if name == "openclaw.json" || upgradeStateCapsuleExcludedRoot(name) {
+		if name == "openclaw.json" || upgradeStateCapsuleExcludedRootForVersion(name, capsule.SchemaVersion) {
 			continue
 		}
 		source := filepath.Join(openClawDir, name)
@@ -1131,7 +1416,13 @@ func (m *GatewayManager) prepareOpenClawStateCapsule(workspace string, req Works
 			if name == "state" {
 				capsule.OriginalExists = true
 			}
-			bytes, files, err := copyTreeStable(source, filepath.Join(dir, "control-original", name))
+			var bytes, files int64
+			var err error
+			if capsule.SchemaVersion >= 3 && upgradePluginControlRoot(name) {
+				bytes, files, err = copyUpgradePluginTree(source, filepath.Join(dir, "control-original", name), openClawDir)
+			} else {
+				bytes, files, err = copyTreeStable(source, filepath.Join(dir, "control-original", name))
+			}
 			if err != nil {
 				return upgradeStateCapsule{}, fmt.Errorf("capture OpenClaw %s capsule: %w", name, err)
 			}
@@ -1300,23 +1591,23 @@ func (m *GatewayManager) restoreOpenClawStateCapsule(workspace string, req Works
 		return false, err
 	}
 	var capsule upgradeStateCapsule
-	if json.Unmarshal(raw, &capsule) != nil || capsule.InstanceID != req.InstanceID || (capsule.SchemaVersion != 1 && capsule.SchemaVersion != 2) {
+	if json.Unmarshal(raw, &capsule) != nil || capsule.InstanceID != req.InstanceID || capsule.SchemaVersion < 1 || capsule.SchemaVersion > 3 {
 		return false, errors.New("invalid OpenClaw state rollback capsule")
 	}
 	openClawDir := filepath.Join(workspace, "home", ".openclaw")
-	if capsule.SchemaVersion == 2 {
+	if capsule.SchemaVersion >= 2 {
 		entries, readErr := os.ReadDir(openClawDir)
 		if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 			return false, readErr
 		}
 		for _, entry := range entries {
 			name := entry.Name()
-			if entry.IsDir() && !upgradeStateCapsuleExcludedRoot(name) && !capsule.ControlDirs[name] {
+			if entry.IsDir() && !upgradeStateCapsuleExcludedRootForVersion(name, capsule.SchemaVersion) && !capsule.ControlDirs[name] {
 				if err := quarantineUpgradeTarget(filepath.Join(openClawDir, name), filepath.Join(dir, "control-failed-target", name)); err != nil {
 					return false, err
 				}
 			}
-			if !entry.IsDir() && name != "openclaw.json" && !upgradeStateCapsuleExcludedRoot(name) {
+			if !entry.IsDir() && name != "openclaw.json" && !upgradeStateCapsuleExcludedRootForVersion(name, capsule.SchemaVersion) {
 				if _, existed := capsule.ControlFiles[name]; !existed {
 					if err := quarantineUpgradeTarget(filepath.Join(openClawDir, name), filepath.Join(dir, "control-failed-target-files", name)); err != nil {
 						return false, err
@@ -1786,6 +2077,11 @@ func (m *GatewayManager) AcquireWriterLease(req WorkspaceUpgradeRequest, token s
 	if ttl < time.Minute || ttl > time.Hour {
 		return WriterLease{}, errors.New("lease ttl must be between one minute and one hour")
 	}
+	unlock, lockErr := m.lockUpgradeOperation(req.InstanceID)
+	if lockErr != nil {
+		return WriterLease{}, lockErr
+	}
+	defer unlock()
 	if err := os.MkdirAll(filepath.Dir(m.leasePath(req.InstanceID)), 0o700); err != nil {
 		return WriterLease{}, err
 	}
@@ -1798,7 +2094,7 @@ func (m *GatewayManager) AcquireWriterLease(req WorkspaceUpgradeRequest, token s
 	lease := WriterLease{SchemaVersion: 1, RolloutID: req.RolloutID, InstanceID: req.InstanceID, UserID: req.UserID, Generation: req.Generation, Token: token, Holder: m.cfg.PodUID, ExpiresAt: now.Add(ttl), UpdatedAt: now}
 	raw, _ := json.Marshal(lease)
 	if existing, readErr := m.readWriterLease(req.InstanceID); readErr == nil {
-		if existing.RolloutID == req.RolloutID && existing.InstanceID == req.InstanceID && existing.UserID == req.UserID && existing.Generation == req.Generation && existing.Token == token {
+		if existing.RolloutID == req.RolloutID && existing.InstanceID == req.InstanceID && existing.UserID == req.UserID && existing.Generation == req.Generation && existing.Token == token && existing.Holder == m.cfg.PodUID {
 			if err := atomicWriteFile(m.leasePath(req.InstanceID), append(raw, '\n'), 0o600); err != nil {
 				return WriterLease{}, err
 			}
@@ -1844,6 +2140,11 @@ func (m *GatewayManager) writerLeaseBlocksGateway(instanceID int) (bool, error) 
 	if lease.ExpiresAt.After(time.Now().UTC()) {
 		return true, nil
 	}
+	unlock, lockErr := m.lockUpgradeOperation(instanceID)
+	if lockErr != nil {
+		return true, lockErr
+	}
+	defer unlock()
 	if err := os.Remove(m.leasePath(instanceID)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return false, fmt.Errorf("remove expired workspace writer lease: %w", err)
 	}
@@ -1867,7 +2168,7 @@ func (m *GatewayManager) requireWriterLease(req WorkspaceUpgradeRequest) (Writer
 	if err != nil {
 		return lease, fmt.Errorf("read writer lease: %w", err)
 	}
-	if lease.RolloutID != req.RolloutID || lease.Token != req.LeaseToken || lease.Generation != req.Generation || lease.UserID != req.UserID {
+	if lease.RolloutID != req.RolloutID || lease.Token != req.LeaseToken || lease.Generation != req.Generation || lease.UserID != req.UserID || lease.Holder != m.cfg.PodUID {
 		return lease, errors.New("writer lease identity mismatch")
 	}
 	if !lease.ExpiresAt.After(time.Now().UTC()) {
@@ -1877,6 +2178,8 @@ func (m *GatewayManager) requireWriterLease(req WorkspaceUpgradeRequest) (Writer
 }
 
 func (m *GatewayManager) RenewWriterLease(req WorkspaceUpgradeRequest, ttl time.Duration) (WriterLease, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	lease, err := m.requireWriterLease(req)
 	if err != nil {
 		return lease, err
@@ -1894,6 +2197,13 @@ func (m *GatewayManager) RenewWriterLease(req WorkspaceUpgradeRequest, ttl time.
 }
 
 func (m *GatewayManager) ReleaseWriterLease(req WorkspaceUpgradeRequest) error {
+	unlock, lockErr := m.lockUpgradeOperation(req.InstanceID)
+	if lockErr != nil {
+		return lockErr
+	}
+	defer unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if _, err := m.requireWriterLease(req); err != nil {
 		return err
 	}

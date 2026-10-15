@@ -10,6 +10,7 @@ import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+from urllib.parse import urlencode
 
 ROOT = Path(__file__).resolve().parents[1]
 PATCHES = ROOT / "patches/hermes-agent"
@@ -147,9 +148,9 @@ class NonNativePolicyTests(unittest.TestCase):
 
 
 class RPCPolicyTests(unittest.TestCase):
-    def test_exact_core_requests_are_supported(self):
+    def test_runtime_ui_requests_are_supported_without_method_whitelist(self):
         params = {
-            "ping": {}, "session.create": {"source": "web"}, "session.list": {"limit": 100},
+            "ping": {}, "session.create": {"source": "web", "profile": "bot_alpha", "cwd": "."}, "session.list": {"limit": 100, "profile": "bot_alpha"},
             "setup.status": {}, "setup.runtime_check": {}, "model.options": {"explicit_only": True},
             "config.set": {"session_id": "session-1", "key": "model", "value": "m --provider managed --session"},
             "approval.pending": {"session_id": "session-1"}, "approval.received": {"session_id": "session-1", "request_id": "approval-1"},
@@ -158,28 +159,40 @@ class RPCPolicyTests(unittest.TestCase):
             "prompt.submit": {"session_id": "session-1", "text": "local stub"},
             "approval.respond": {"session_id": "session-1", "request_id": "approval-1", "choice": "once"},
             "clarify.respond": {"session_id": "session-1", "request_id": "clarify-1", "answer": "yes"},
+            "profiles.list": {"include_sessions": True}, "profiles.describe": {"name": "bot_alpha"},
+            "profiles.create": {"name": "bot_alpha", "clone_from": None, "no_skills": False, "share_auth": True},
+            "profiles.configure": {"name": "bot_alpha", "model": "m", "provider": "managed", "disabled_skills": [], "ui_meta": {}},
+            "profiles.set_asset": {"name": "bot_alpha", "asset": "avatar", "clear": True},
+            "profiles.get_asset": {"name": "bot_alpha", "asset": "avatar"}, "mcp.catalog": {},
+            "projects.list": {"profile": "bot_alpha"}, "projects.tree": {"profile": "bot_alpha", "preview_limit": 3},
+            "projects.create": {"name": "Demo project", "folders": ["."], "primary_path": ".", "profile": "bot_alpha", "use": True},
+            "projects.update": {"id": "project-1", "name": "Renamed"},
+            "projects.add_folder": {"id": "project-1", "path": ".", "label": "workspace", "is_primary": False},
+            "projects.delete": {"id": "project-1", "profile": "bot_alpha"},
         }
         for method in ("session.status", "session.history", "session.interrupt", "session.activate", "session.usage", "session.close"):
             params[method] = {"session_id": "session-1"}
-        self.assertEqual(set(policy.RPC_FIELDS), set(params))
         for method, fields in params.items():
             with self.subTest(method=method):
                 self.assertIsNone(policy.rpc_denial(method, fields, None))
+        for method, fields in (("fs.read", {"path": "."}), ("git.status", {"path": "."}), ("mcp.servers.list", {}), ("future.desktop.ui.read", {"workspace": "."})):
+            with self.subTest(method=method):
+                self.assertIsNone(policy.rpc_denial(method, fields, None))
 
-    def test_no_native_arbitrary_shell_files_config_or_profile_rpc(self):
-        for method in ("shell.exec", "cli.exec", "fs.read", "browser.manage", "desktop.respond", "profiles.configure", "profiles.list", "session.active_list", "tools.call"):
+    def test_no_native_rpc_families(self):
+        for method in ("shell.exec", "cli.exec", "browser.manage", "desktop.respond", "terminal.start", "tools.call"):
             with self.subTest(method=method):
                 self.assertEqual((-32601, "unsupported_lite_web_rpc"), policy.rpc_denial(method, {}, None))
-        for fields in ({"cwd": "/"}, {"profile": "other"}, {"source": "desktop"}, {"source": "internal"}, {"messages": []}, {"model": "other"}):
+        for fields in ({"cwd": "/"}, {"profile": "../other"}, {"source": "internal"}):
             self.assertEqual((-32602, "unsupported_lite_web_parameters"), policy.rpc_denial("session.create", fields, None))
+        self.assertIsNone(policy.rpc_denial("session.create", {"model": "other", "future_option": {"enabled": True}}, None))
 
     def test_rpc_types_and_bounds(self):
         for method, fields in [
             ("session.resume", {"session_id": "../other"}),
-            ("session.resume", {"session_id": "safe", "lazy": "true"}),
-            ("session.list", {"limit": True}), ("session.list", {"limit": 101}),
-            ("approval.respond", {"session_id": "safe", "choice": "always"}),
-            ("session.events.since", {"session_id": "safe", "last_seen": -1}),
+            ("profiles.describe", {"name": "../other"}),
+            ("projects.create", {"name": "demo", "folders": ["/etc"]}),
+            ("projects.create", {"name": "demo", "folders": ["../outside"]}),
         ]:
             with self.subTest(method=method, fields=fields):
                 self.assertEqual((-32602, "unsupported_lite_web_parameters"), policy.rpc_denial(method, fields, None))
@@ -204,24 +217,21 @@ class RPCPolicyTests(unittest.TestCase):
             {"session_id": "s", "key": "fast", "value": "toggle"},
             {"session_id": "s", "key": "fast", "value": True},
             {"session_id": "s", "key": "model", "value": "m --provider managed --global"},
-            {"session_id": "s", "key": "env", "value": "KEY=x"},
         ]:
-            self.assertEqual((-32602, "unsupported_lite_web_parameters"), policy.rpc_denial("config.set", fields, None), fields)
+            self.assertIsNone(policy.rpc_denial("config.set", fields, None), fields)
         for fields in ({"cols": True}, {"cols": 501}, {"model": "m"}, {"model": "m", "provider": "p", "fast": "false"}, {"reasoning_effort": "show"}):
-            self.assertIsNotNone(policy.rpc_denial("session.create", fields, None), fields)
+            self.assertIsNone(policy.rpc_denial("session.create", fields, None), fields)
 
-    def test_catalogue_requires_a_configured_pair_and_failure_does_not_allow_writes(self):
+    def test_runtime_owns_model_and_provider_validation(self):
         payload = {"provider": "managed", "model": "default", "providers": [{"slug": "managed", "authenticated": True, "models": ["m"]}, {"slug": "external", "authenticated": False, "models": ["evil"]}]}
         inventory = SimpleNamespace(build_model_options_payload=lambda *args, **kwargs: payload)
         namespace = {"_model_picker_context": lambda _: object()}
         with patch.dict("sys.modules", {"hermes_cli": SimpleNamespace(), "hermes_cli.inventory": inventory}):
-            for fields in ({"model": "m", "provider": "managed"}, {"model": "default", "provider": "managed"}):
+            for fields in ({"model": "m", "provider": "managed"}, {"model": "default", "provider": "managed"}, {"model": "evil", "provider": "external"}, {"model": "new", "provider": "managed"}):
                 self.assertIsNone(policy.rpc_prepare("session.create", fields, namespace, None))
-            for fields in ({"model": "evil", "provider": "external"}, {"model": "new", "provider": "managed"}):
-                self.assertEqual((-32602, "unconfigured_lite_model"), policy.rpc_prepare("session.create", fields, namespace, None))
             self.assertIsNone(policy.rpc_prepare("config.set", {"key": "model", "value": "m --provider managed --session"}, namespace, None))
             self.assertIsNone(policy.rpc_prepare("setup.runtime_check", {"provider": "managed"}, namespace, None))
-        self.assertIsNotNone(policy.rpc_prepare("session.create", {"model": "m", "provider": "managed"}, namespace, None))
+        self.assertIsNone(policy.rpc_prepare("session.create", {"model": "m", "provider": "managed"}, namespace, None))
 
     def test_config_scope_serializes_close_without_holding_registry_lock(self):
         entered, release, closed = threading.Event(), threading.Event(), threading.Event()
@@ -254,13 +264,12 @@ class RPCPolicyTests(unittest.TestCase):
         namespace["_sessions"]["s"] = {"agent": None}
         self.assertEqual(5032, change(3, {"session_id": "s"})["error"]["code"])
 
-    def test_readiness_and_pending_approval_use_safe_projection(self):
+    def test_readiness_and_pending_approval_preserve_runtime_shape(self):
         ns = {"_err": lambda rid, code, message: {"id": rid, "error": {"code": code, "message": message}}, "_approval_request_payload": lambda _: {"request_id": "r", "command": "safe command", "choices": ["once", "session", "always", "deny"], "private": "secret"}}
         response = policy.rpc_result("setup.runtime_check", {"id": 1, "result": {"ok": False, "error": "private-token", "source": "credential-file"}}, ns, None)
-        self.assertEqual({"id": 1, "result": {"ok": False}}, response)
+        self.assertEqual({"id": 1, "result": {"ok": False, "error": "private-token", "source": "credential-file"}}, response)
         response = policy.rpc_result("approval.pending", {"id": 2, "result": {"approvals": [{"command": "unredacted secret"}]}}, ns, None)
-        self.assertNotIn("secret", json.dumps(response))
-        self.assertEqual(["once", "deny"], response["result"]["approvals"][0]["choices"])
+        self.assertIn("unredacted secret", json.dumps(response))
 
 
 class HydrationLifecycleTests(unittest.TestCase):
@@ -408,6 +417,100 @@ class PublicProtocolTests(unittest.TestCase):
                     asyncio.run(boundary(scope, None, send))
                     self.assertEqual([{"type": "websocket.accept", "subprotocol": selected}], sent)
                     self.assertNotIn("fixture-only", json.dumps(sent))
+
+
+class WorkspaceBoundaryTests(unittest.TestCase):
+    def setUp(self):
+        self.boundary_module = module("lite_boundary_workspace_test", PATCHES / "lite_gateway_boundary.py")
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name) / "instance"
+        self.root.mkdir()
+        self.env = {
+            "CLAWMANAGER_CONTROL_UI_ORIGIN": "https://internal.example",
+            "CLAWMANAGER_TRUSTED_PROXY_CIDRS": "10.0.0.0/24",
+            "CLAWMANAGER_WORKSPACE_PATH": str(self.root),
+        }
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def scope(self, method="GET", query=""):
+        return {
+            "type": "http", "method": method, "path": "/api/fs/list",
+            "query_string": query.encode(), "client": ("10.0.0.5", 12345),
+            "headers": [(b"origin", b"https://internal.example")],
+        }
+
+    @staticmethod
+    def wire_path(value):
+        return str(value).replace("\\", "/")
+
+    def test_query_paths_are_limited_to_current_instance_workspace(self):
+        inside = self.root / "project" / "file.txt"
+        outside = Path(self.temp.name) / "other" / "file.txt"
+        with patch.dict(os.environ, self.env, clear=True):
+            boundary = self.boundary_module.LiteGatewayBoundary(lambda *_: None)
+            self.assertIsNone(boundary.denial(self.scope(query=urlencode({"path": self.wire_path(inside)}))))
+            self.assertEqual("workspace_path_rejected", boundary.denial(
+                self.scope(query=urlencode({"path": self.wire_path(outside)}))))
+            self.assertEqual("workspace_path_rejected", boundary.denial(
+                self.scope(query=urlencode({"path": "../sibling"}))))
+
+    def test_realpath_rejects_workspace_symlink_escape(self):
+        outside = Path(self.temp.name) / "outside"
+        outside.mkdir()
+        link = self.root / "escape"
+        try:
+            link.symlink_to(outside, target_is_directory=True)
+        except OSError as error:
+            self.skipTest(f"symlinks unavailable: {error}")
+        with patch.dict(os.environ, self.env, clear=True):
+            self.assertFalse(self.boundary_module.workspace_path_allowed(str(link / "secret.txt")))
+
+    def test_json_body_is_checked_and_replayed_without_shape_changes(self):
+        payload = {"project": {"path": self.wire_path(self.root / "project")}, "options": {"custom": True}}
+        body = json.dumps(payload).encode()
+        received = []
+        sent = []
+
+        async def application(scope, receive, send):
+            received.append(await receive())
+            await send({"type": "http.response.start", "status": 204, "headers": []})
+
+        async def receive():
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        async def send(event):
+            sent.append(event)
+
+        scope = self.scope(method="POST")
+        scope["headers"].append((b"content-type", b"application/json"))
+        with patch.dict(os.environ, self.env, clear=True):
+            boundary = self.boundary_module.LiteGatewayBoundary(application)
+            asyncio.run(boundary(scope, receive, send))
+        self.assertEqual([{"type": "http.request", "body": body, "more_body": False}], received)
+        self.assertEqual(204, sent[0]["status"])
+
+    def test_json_body_rejects_nested_workspace_escape(self):
+        body = json.dumps({"project": {"path": self.wire_path(Path(self.temp.name) / "other")}}).encode()
+        sent = []
+
+        async def forbidden(*_):
+            self.fail("rejected body reached the Runtime API")
+
+        async def receive():
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        async def send(event):
+            sent.append(event)
+
+        scope = self.scope(method="POST")
+        scope["headers"].append((b"content-type", b"application/json"))
+        with patch.dict(os.environ, self.env, clear=True):
+            boundary = self.boundary_module.LiteGatewayBoundary(forbidden)
+            asyncio.run(boundary(scope, receive, send))
+        self.assertEqual(403, sent[0]["status"])
+        self.assertIn(b"workspace_path_rejected", sent[1]["body"])
 
 
 if __name__ == "__main__":

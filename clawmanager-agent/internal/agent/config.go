@@ -115,12 +115,21 @@ func LoadConfigFromEnv() (Config, error) {
 	cfg.AllowedOrigins = uniqueOrigins(backendOrigin)
 	cfg.PublicOrigin = backendOrigin
 	cfg.TrustedProxies = trustedProxiesFromEnvOrPodIP(cfg.PodIP)
+	if runtimeType == "openclaw" {
+		if marker, err := os.Stat(gateway.ManagedProxyPolicyMarker); err == nil && marker.Mode().IsRegular() {
+			cfg.ProxyPolicyFile = gateway.ManagedProxyPolicyFile
+			cfg.TrustedProxies = nil
+		}
+	}
 	if runtimeType == "hermes" && os.Getenv("CLAWMANAGER_HERMES_DESKTOP_WEB_ENABLED") == "true" {
 		// The Lite boundary accepts only explicitly configured trust. Do not
 		// infer a cluster CIDR from the Pod IP or use a public backend URL.
 		cfg.PublicOrigin = strings.TrimSpace(os.Getenv("CLAWMANAGER_CONTROL_UI_ORIGIN"))
 		cfg.AllowedOrigins = nil
 		cfg.TrustedProxies = nil
+		if marker, err := os.Stat(gateway.HermesManagedProxyPolicyMarker); err == nil && marker.Mode().IsRegular() {
+			cfg.ProxyPolicyFile = gateway.ManagedProxyPolicyFile
+		}
 		for _, cidr := range strings.Split(os.Getenv("CLAWMANAGER_TRUSTED_PROXY_CIDRS"), ",") {
 			if cidr = strings.TrimSpace(cidr); cidr != "" {
 				cfg.TrustedProxies = append(cfg.TrustedProxies, cidr)
@@ -398,6 +407,11 @@ func firstNonLoopbackIP() string {
 }
 
 func deploymentName(podName, runtimeType string) string {
+	// The control plane owns this identity. Pod names can be truncated by
+	// Kubernetes and cannot reliably reconstruct long upgrade deployment names.
+	if value := strings.TrimSpace(envOrDefault("CLAWMANAGER_RUNTIME_DEPLOYMENT_NAME", "")); value != "" {
+		return value
+	}
 	if value := strings.TrimSpace(envOrDefault("CLAWMANAGER_DEPLOYMENT_NAME", "")); value != "" {
 		return value
 	}

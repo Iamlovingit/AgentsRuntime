@@ -42,6 +42,11 @@ func (m *GatewayManager) superviseGateway(ctx context.Context, gatewayID string,
 }
 
 func (m *GatewayManager) nextGatewayHealthDelay() time.Duration {
+	if m.nextGatewayHealthCheckDelay != nil {
+		if delay := m.nextGatewayHealthCheckDelay(); delay > 0 {
+			return delay
+		}
+	}
 	interval := m.cfg.GatewayReportInterval
 	if interval <= 0 {
 		interval = heartbeat.DefaultInterval

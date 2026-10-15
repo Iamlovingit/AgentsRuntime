@@ -35,6 +35,8 @@ type GatewayManager struct {
 	ports        *PortAllocator
 	health       GatewayHealthChecker
 	capabilities *HealthCapabilities
+	// Test seam; production retains the common bounded, jittered cadence.
+	nextGatewayHealthCheckDelay func() time.Duration
 
 	mu             sync.RWMutex
 	draining       bool
@@ -389,6 +391,12 @@ func (m *GatewayManager) DeleteGateway(ctx context.Context, gatewayID string) er
 // process has positively acknowledged termination. This is the safety boundary
 // used by stateful OpenClaw upgrades.
 func (m *GatewayManager) StopGatewayConfirmed(ctx context.Context, gatewayID string) error {
+	// The control API calls this entry point directly. Isolated gateways have
+	// one lifecycle owner for cancellation, writer drain and lease release;
+	// stopping their process independently races that owner's completion.
+	if m.IsolatedGatewayLifecycle() {
+		return m.deleteIsolatedGateway(ctx, gatewayID)
+	}
 	m.mu.Lock()
 	record, ok := m.gateways[gatewayID]
 	if !ok {
@@ -1116,6 +1124,13 @@ func (m *GatewayManager) stopTimeout() time.Duration {
 func OpenClawGatewayEnv(base []string, cfg Config, req CreateGatewayRequest, workspacePath string, port int) []string {
 	env := append([]string(nil), base...)
 	env = ApplyRequestEnvironment(env, req)
+	// Control-plane policy always overrides untrusted instance environment.
+	env = unsetEnv(env, "CLAWMANAGER_PROXY_POLICY_FILE")
+	env = unsetEnv(env, "CLAWMANAGER_PROXY_POLICY_NAMESPACE")
+	if cfg.ProxyPolicyFile != "" {
+		env = setEnv(env, "CLAWMANAGER_PROXY_POLICY_FILE", cfg.ProxyPolicyFile)
+		env = setEnv(env, "CLAWMANAGER_PROXY_POLICY_NAMESPACE", cfg.Namespace)
+	}
 	env = ApplyLiteTeamConfigEnvironment(env, req, workspacePath)
 	env = setEnv(env, "CLAWMANAGER_INSTANCE_ID", strconv.Itoa(req.InstanceID))
 	env = setEnv(env, "CLAWMANAGER_USER_ID", strconv.Itoa(req.UserID))
@@ -1228,6 +1243,9 @@ func NewExecProcessStarter(cfg Config) *ExecProcessStarter {
 }
 
 func (s *ExecProcessStarter) StartGateway(ctx context.Context, spec GatewayStartSpec) (ManagedProcess, error) {
+	if err := validateProxyPolicyForStart(s.cfg); err != nil {
+		return ManagedProcess{}, err
+	}
 	if len(spec.Command) == 0 {
 		return ManagedProcess{}, fmt.Errorf("gateway command is empty")
 	}

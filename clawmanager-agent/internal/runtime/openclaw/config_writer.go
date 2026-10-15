@@ -123,6 +123,16 @@ func WriteGatewayConfig(cfg gateway.Config, req gateway.CreateGatewayRequest, wo
 		if err := seedOpenClawRedisTeamPlugin(req, workspacePath); err != nil {
 			return err
 		}
+		if gateway.IsOpenClawAtLeast(openClawVersion, "2026.10.2") {
+			legacyTarget := filepath.Join(instancePaths.Persistent, "extensions", openClawRedisTeamPluginID)
+			// The synchronizer deliberately preserves an unrecognized extension.
+			// Do not silently override that user-owned implementation either.
+			if validateOpenClawRedisTeamPlugin(legacyTarget, false) == nil {
+				if err := selectBundledRedisTeamPlugin(config); err != nil {
+					return err
+				}
+			}
+		}
 	}
 
 	gatewayConfig := ensureObject(config, "gateway")
@@ -241,6 +251,19 @@ func WriteGatewayConfig(cfg gateway.Config, req gateway.CreateGatewayRequest, wo
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("stat openclaw cron dir: %w", err)
 	}
+	return nil
+}
+
+// 10.2's native channel startup uses source/ownership facts in addition to an
+// allowlist. Pin this platform-owned plugin to the immutable image bundle using
+// the upstream load-path selector, never by trusting arbitrary global plugins.
+func selectBundledRedisTeamPlugin(config map[string]any) error {
+	root := filepath.Join(openClawGlobalPackageDir, "dist", "extensions", openClawRedisTeamPluginID)
+	if err := validateOpenClawRedisTeamPlugin(root, true); err != nil {
+		return fmt.Errorf("managed Team bundle is missing or invalid: %w", err)
+	}
+	load := ensureObject(ensureObject(config, "plugins"), "load")
+	load["paths"] = appendUniqueStringArray(load["paths"], filepath.ToSlash(root))
 	return nil
 }
 

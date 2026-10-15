@@ -23,7 +23,7 @@ try {
   const agentHarness = await import(pathToFileURL(path.join(openclawDist, "plugin-sdk", "agent-harness-runtime.js")).href);
   let hookRunnerGlobal = null;
   for (const name of await fs.readdir(openclawDist)) {
-    if (!name.startsWith("hook-runner-global-") || !name.endsWith(".js")) continue;
+    if (!name.startsWith("hook-runner-global-") || !/\.m?js$/.test(name)) continue;
     const candidate = await import(pathToFileURL(path.join(openclawDist, name)).href);
     if (typeof candidate.i === "function" && typeof candidate.t === "function") {
       hookRunnerGlobal = candidate;
