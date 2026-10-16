@@ -30,6 +30,48 @@ The repository currently documents these runtime images:
 Before adding or upgrading a channel plugin in OpenClaw Lite, read the
 [OpenClaw Lite Channel Adapter Guide](clawmanager-agent/docs/openclaw-lite-channel-adaptation.md).
 
+## OpenClaw version and Team compatibility
+
+The canonical `openclaw` (Pro) and `openclaw-lite` builds both use
+`openclaw/Dockerfile.openclaw` and pin OpenClaw **2026.10.2** with Node
+**24.21.0**. The [version lock](openclaw/openclaw102.lock.json) records core
+package integrity and managed channel versions; the build verifies both the
+download and the installed version. This does not upgrade `openclaw-shell`.
+Overlay Dockerfiles inherit their base image's core version and do not replace
+the canonical release build.
+
+Runtime Team adapters support compatible ClawManager Leader-mediated and
+single-member delivery contracts. Continuous-collaboration chat, functional
+avatars, the shared-file editor, and the `@member` selector belong to the
+**ClawManager App**. Use compatible App and Runtime versions; publishing a
+Runtime image neither updates the UI nor migrates or restarts existing instances.
+Data-format upgrades require the validated ClawManager migration workflow, not
+a direct image replacement.
+
+## GitHub Actions and image tags
+
+The [image workflow](.github/workflows/docker-ghcr.yml) runs on matching source
+changes pushed to `main`, or manually on the repository's default branch. The
+branch check also requires the selected branch to be the default branch.
+Feature-branch pushes, `v*` tags, and README-only changes do not publish images.
+The current path filter excludes `plugins/**`; after a plugin-only change is
+merged, run the workflow manually.
+
+Unless a manual run specifies `image_namespace`, images use the lowercased
+repository namespace:
+
+```text
+ghcr.io/<owner>/<repo>/openclaw:latest
+ghcr.io/<owner>/<repo>/openclaw-lite:latest
+```
+
+For example, `Stark-Han/AgentsRuntime` publishes under
+`ghcr.io/stark-han/agentsruntime/`; a fork does not update upstream packages.
+Successful amd64 and arm64 builds are combined into manifests tagged `latest`
+and `vYYYY.M.D` (Asia/Shanghai). Check the final publish job and manifest, not just
+a successful architecture build. Tags can move: deploy a verified `@sha256`
+digest for repeatable upgrades. A failed or cancelled run is not a new release.
+
 ## Manual builds
 
 You can build each runtime image directly with Docker from the repository root.
