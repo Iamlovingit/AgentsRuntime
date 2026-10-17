@@ -51,7 +51,7 @@ def main():
             "CLAWMANAGER_CONTROL_UI_ORIGIN": ORIGIN,
             "CLAWMANAGER_TRUSTED_PROXY_CIDRS": "192.0.2.0/24",
             "CLAWMANAGER_HERMES_DESKTOP_WEB_ENABLED": "true",
-            "CLAWMANAGER_HERMES_BACKEND_MODE": "dashboard",
+            "CLAWMANAGER_HERMES_BACKEND_MODE": "serve",
             "HERMES_DASHBOARD_BASIC_AUTH_USERNAME": "clawmanager",
             "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD": private_values[0],
             "CLAWMANAGER_LLM_BASE_URL": "http://ai.invalid/v1",
@@ -99,8 +99,8 @@ def main():
                     raise AssertionError("untrusted websocket origin was accepted")
             except InvalidStatus:
                 pass
-            # The classic Dashboard Chat tab is a fixed prebuilt Hermes TUI.
-            # Merely having index.html is not enough to prove this dependency.
+            # The bundle is a headless session worker used by the managed
+            # Desktop protocol; no legacy Dashboard/TUI page is shipped.
             import psutil
             uri = BASE.replace("http://", "ws://") + "/api/pty?channel=smoke-chat&fresh=1"
             async with connect(uri, origin=ORIGIN, subprotocols=["hermes-gateway-v1", "hermes-gateway-ticket." + ticket()], open_timeout=5) as socket:
@@ -108,13 +108,13 @@ def main():
                 assert output, "classic chat returned no terminal output"
                 children = psutil.Process(process.pid).children(recursive=True)
                 node_commands = [child.cmdline() for child in children if child.name() == "node"]
-                assert ["/usr/local/bin/node", "--expose-gc", "/opt/hermes-agent/hermes_cli/tui_dist/entry.js"] in node_commands, "classic chat did not start the fixed Hermes TUI"
+                assert ["/usr/local/bin/node", "--expose-gc", "/opt/hermes-agent/hermes_cli/tui_dist/entry.js"] in node_commands, "Desktop chat did not start the managed session worker"
                 for command in node_commands:
                     assert not any("internal=" in arg or "token=" in arg for arg in command), "credential appeared in child argv"
 
         log_path = Path(temporary) / "server.log"
         with log_path.open("wb") as logfile:
-            process = subprocess.Popen(["/usr/local/bin/start-hermes-lite-runtime"], env=environment,
+            process = subprocess.Popen(["/usr/local/bin/start-hermes-lite-backend"], env=environment,
                                        stdout=logfile, stderr=subprocess.STDOUT, start_new_session=True)
             try:
                 deadline = time.monotonic() + 90
@@ -143,11 +143,11 @@ def main():
                     assert request(path)[0] == 403, "unsupported native/update API accepted"
                 assert request("/api/health?token=fixture-secret")[0] == 403, "credential URL accepted"
                 asyncio.run(websocket_checks())
-                status, html = request("/")
-                assert status == 200 and b"<html" in html.lower(), "classic Dashboard HTML unavailable"
-                assert all(value.encode() not in html for value in private_values), "credential leaked into Dashboard HTML"
+                status, body = request("/")
+                assert status == 404 and b"<html" not in body.lower(), "legacy Dashboard UI unexpectedly available"
+                assert all(value.encode() not in body for value in private_values), "credential leaked into disabled UI response"
                 assert sentinel.read_text() == "preserve-me", "existing state changed"
-                print("PASS: actual Hermes login, HTTP identity, WS ping/replay/Origin, fixed classic TUI, fallback HTML, state preservation")
+                print("PASS: actual Hermes login, HTTP identity, WS ping/replay/Origin, managed session worker, legacy UI absence, state preservation")
             except Exception:
                 diagnostic = log_path.read_text(encoding="utf-8", errors="replace")[-6000:]
                 for value in private_values:

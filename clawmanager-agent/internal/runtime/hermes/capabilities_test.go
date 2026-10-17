@@ -12,9 +12,30 @@ import (
 func desktopCapabilityConfig(t *testing.T) gateway.Config {
 	t.Helper()
 	t.Setenv(desktopWebFlag, "true")
-	t.Setenv("CLAWMANAGER_HERMES_BACKEND_MODE", "dashboard")
+	t.Setenv("CLAWMANAGER_HERMES_BACKEND_MODE", "serve")
 	t.Setenv("CLAWMANAGER_TEAM_ENABLED", "")
-	return gateway.Config{RuntimeType: "hermes", GatewayCommand: []string{"start-hermes-lite-dashboard"}, ControlToken: "test-private-control", ReportToken: "test-private-report", WorkspaceRoot: filepath.Join(t.TempDir(), "unused-workspaces"), AgentDataDir: filepath.Join(t.TempDir(), "unused-agent"), GatewayPortStart: 20000, GatewayPortEnd: 20099, GatewayPortBlockSize: 1, Capacity: 100, BackendURL: "http://clawmanager-gateway.clawmanager-system.svc.cluster.local:9001", PublicOrigin: "http://clawmanager-gateway.clawmanager-system.svc.cluster.local:9001", TrustedProxies: []string{"10.42.0.0/16"}, ImageRef: "registry.example/hermes@sha256:" + strings.Repeat("a", 64)}
+	return gateway.Config{RuntimeType: "hermes", GatewayCommand: []string{"start-hermes-lite-backend"}, ControlToken: "test-private-control", ReportToken: "test-private-report", WorkspaceRoot: filepath.Join(t.TempDir(), "unused-workspaces"), AgentDataDir: filepath.Join(t.TempDir(), "unused-agent"), GatewayPortStart: 20000, GatewayPortEnd: 20099, GatewayPortBlockSize: 1, Capacity: 100, BackendURL: "http://clawmanager-gateway.clawmanager-system.svc.cluster.local:9001", PublicOrigin: "http://clawmanager-gateway.clawmanager-system.svc.cluster.local:9001", TrustedProxies: []string{"10.42.0.0/16"}, ImageRef: "registry.example/hermes@sha256:" + strings.Repeat("a", 64)}
+}
+
+func TestDesktopArtifactManagedPolicyMarkerIsExact(t *testing.T) {
+	if !desktopArtifactPath(gateway.HermesManagedProxyPolicyMarker) {
+		t.Fatal("verified managed policy marker rejected")
+	}
+	for _, file := range []string{
+		gateway.HermesManagedProxyPolicyMarker + ".other",
+		gateway.HermesManagedProxyPolicyMarker + "/child",
+		"/usr/local/share/clawmanager/../clawmanager/hermes-proxy-policy-v1",
+		"/usr/local/share/clawmanager/unverified",
+	} {
+		if desktopArtifactPath(file) {
+			t.Fatalf("unverified marker path accepted: %q", file)
+		}
+	}
+	for _, file := range desktopRequiredArtifacts {
+		if !desktopArtifactPath(file) {
+			t.Fatalf("legacy required artifact rejected: %q", file)
+		}
+	}
 }
 
 func TestDesktopCapabilityRequiresManagedConfiguration(t *testing.T) {
@@ -86,7 +107,7 @@ func TestDesktopCapabilityMissingReleaseDoesNotTouchUserState(t *testing.T) {
 	if legacy.desktopConfigurationVerified(cfg) {
 		t.Fatal("later environment change enabled legacy profile")
 	}
-	t.Setenv("CLAWMANAGER_HERMES_BACKEND_MODE", "serve")
+	t.Setenv("CLAWMANAGER_HERMES_BACKEND_MODE", "dashboard")
 	if NewProfile("hermes").desktopConfigurationVerified(cfg) {
 		t.Fatal("unverified backend declared capability")
 	}

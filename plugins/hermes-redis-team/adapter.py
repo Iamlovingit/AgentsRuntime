@@ -1473,6 +1473,16 @@ def write_task_result(
     return payload
 
 
+def _is_single_member_envelope(settings: RedisTeamSettings, envelope: dict[str, Any]) -> bool:
+    return (
+        envelope.get("executionType") == "single_member"
+        and _trim(envelope.get("executorMemberKey")) == settings.member_id
+        and _trim(envelope.get("from")) in {"clawmanager", "clawmanager-monitor"}
+        and _trim(envelope.get("rootTaskId") or envelope.get("taskId")).startswith(f"team-{settings.team_id}-task-")
+        and _trim(envelope.get("assignmentId") or envelope.get("workId")) == "single-member"
+    )
+
+
 def normalize_envelope(raw: Any) -> Optional[dict[str, Any]]:
     if not isinstance(raw, dict):
         return None
@@ -1489,6 +1499,10 @@ def normalize_envelope(raw: Any) -> Optional[dict[str, Any]]:
         "rootMessageId": raw.get("rootMessageId") or raw.get("root_message_id") or raw.get("messageId") or raw.get("id"),
         "workId": raw.get("workId") or raw.get("work_id") or raw.get("assignmentId") or raw.get("assignment_id"),
         "assignmentId": raw.get("assignmentId") or raw.get("assignment_id") or raw.get("workId") or raw.get("work_id"),
+        "executionType": raw.get("executionType"),
+        "executorMemberKey": raw.get("executorMemberKey"),
+        "contextTaskId": raw.get("contextTaskId"),
+        "followupContext": raw.get("followupContext") if isinstance(raw.get("followupContext"), dict) else {},
         "phaseId": raw.get("phaseId") or raw.get("phase_id"),
         "revision": raw.get("revision") or 1,
         "teamId": raw.get("teamId"),
@@ -1926,6 +1940,7 @@ async def _completion_ack(
 ) -> Optional[dict[str, Any]]:
     deadline = time.monotonic() + max(0.0, wait_seconds)
     while True:
+        pending = None
         for key in (
             _completion_ack_key(settings, completion_id, attempt_id),
             _completion_state_key(settings, completion_id),
@@ -1937,58 +1952,91 @@ async def _completion_ack(
                 except (TypeError, json.JSONDecodeError):
                     value = None
                 if isinstance(value, dict):
-                    return value
+                    if value.get("completionId") not in (None, "", completion_id):
+                        continue
+                    if value.get("attemptId") not in (None, "", attempt_id):
+                        continue
+                    if _trim(value.get("decision")).lower() in {"accepted", "rejected"}:
+                        return value
+                    pending = value
+        if pending is not None:
+            return pending
         if time.monotonic() >= deadline:
             return None
         await asyncio.sleep(0.2)
 
 
-async def _observe_late_completion(
+def _record_completion_decision(
     settings: RedisTeamSettings,
+    envelope: dict[str, Any],
     completion_id: str,
     attempt_id: str,
-    task_id: str,
     status: str,
     summary: str,
     artifact_refs: list[str],
-) -> None:
-    redis = AsyncRedisClient(settings.redis_url)
-    try:
-        await redis.connect()
-        acknowledgement = await _completion_ack(
-            redis,
-            settings,
-            completion_id,
-            attempt_id,
-            wait_seconds=300,
-        )
-    except Exception:
-        return
-    finally:
-        redis.close()
-    decision = _trim((acknowledgement or {}).get("decision")).lower()
-    if decision not in {"accepted", "rejected"}:
-        return
+    decision: str,
+    *,
+    new_attempt: bool = False,
+    explicit: bool = False,
+) -> bool:
+    # Re-read after Redis I/O. A late receipt must never mutate a replacement
+    # assignment/revision/attempt, nor regress an already accepted terminal.
     active = _load_active_envelope(settings)
-    if _trim(active.get("taskId") or active.get("rootTaskId")) == task_id:
-        active["completionDecision"] = decision
-        active["terminal"] = decision == "accepted"
-        active["terminalStatus"] = status if decision == "accepted" else ""
-        active["completionId"] = completion_id
-        if decision == "accepted":
-            active["completedAt"] = _now_iso()
-        _persist_active_envelope(settings, active)
+    if (not active or active.get("terminal") or
+            _assignment_identity(active) != _assignment_identity(envelope) or
+            _completion_id(settings, active) != completion_id or
+            (not new_attempt and active.get("completionAttemptId") != attempt_id)):
+        return False
+    active.update({
+        "completionDecision": decision,
+        "completionId": completion_id,
+        "completionAttemptId": attempt_id,
+        "completionStatus": status,
+        "completionSummary": summary,
+        "completionArtifactRefs": artifact_refs,
+        "terminal": decision == "accepted",
+        "terminalStatus": status if decision == "accepted" else "",
+    })
+    if explicit:
+        active["explicitCompletionSubmitted"] = True
+    if decision == "accepted":
+        active["completedAt"] = _now_iso()
+    _persist_active_envelope(settings, active)
     write_local_status(
         settings,
         {
-            "availability": "idle" if decision == "accepted" and status == "succeeded" else "blocked",
-            "runtimeStatus": status if decision == "accepted" else "blocked",
-            "currentTaskId": task_id,
+            "availability": ("idle" if status == "succeeded" else "blocked") if decision == "accepted" else "busy",
+            "runtimeStatus": status if decision == "accepted" else ("running" if decision == "rejected" else "completion_pending"),
+            "currentTaskId": active.get("taskId") or active.get("rootTaskId"),
+            "currentAssignmentId": active.get("assignmentId") or active.get("workId"),
             "progress": 100 if decision == "accepted" else 99,
-            "lastSummary": _trim((acknowledgement or {}).get("reason")) or summary,
+            "lastSummary": summary,
             "artifactRefs": artifact_refs,
         },
     )
+    return True
+
+
+async def _reconcile_pending_completion(redis: AsyncRedisClient, settings: RedisTeamSettings) -> None:
+    # Owned by the long-lived adapter presence loop, not the temporary tool
+    # asyncio loop. Persisted receipt identity also survives Gateway restart.
+    # Redis remains the authority; the local envelope is only a recovery cursor.
+    active = _load_active_envelope(settings)
+    if active.get("terminal") or active.get("completionDecision") not in {"submitted", "deferred"}:
+        return
+    completion_id = _trim(active.get("completionId"))
+    attempt_id = _trim(active.get("completionAttemptId"))
+    status = _trim(active.get("completionStatus"))
+    if not completion_id or not attempt_id or status not in {"succeeded", "failed", "cancelled"}:
+        return
+    acknowledgement = await _completion_ack(redis, settings, completion_id, attempt_id, wait_seconds=0)
+    decision = _trim((acknowledgement or {}).get("decision")).lower()
+    if decision in {"accepted", "rejected"}:
+        _record_completion_decision(
+            settings, active, completion_id, attempt_id, status,
+            _trim((acknowledgement or {}).get("reason")) or active.get("completionSummary", ""),
+            active.get("completionArtifactRefs") or [], decision,
+        )
 
 
 async def _propose_completion(
@@ -2030,6 +2078,7 @@ async def _propose_completion(
         artifact_refs=normalized_artifact_refs,
     )
     completion_id = _completion_id(settings, envelope)
+    single_member = _is_single_member_envelope(settings, envelope)
     attempt_id = f"attempt_{uuid.uuid4().hex}"
     artifact_meta = artifact_metadata(settings, result["artifactRefs"])
     reviewed_refs = validate_artifact_refs(settings, reviewed_artifact_refs)
@@ -2050,13 +2099,13 @@ async def _propose_completion(
             "completionSource": COMPLETION_SOURCE,
             "explicitCompletion": True,
             "agentInvokedCompletionTool": explicit or None,
-            "assignmentResultOnly": True,
-            "rootTaskTerminal": False,
+            "assignmentResultOnly": not single_member,
+            "rootTaskTerminal": single_member,
             "status": status,
             "availability": "idle" if status == "succeeded" else "blocked",
             "runtimeStatus": "completion_pending",
-            "workflowFinal": False,
-            "finalAnswerReady": False,
+            "workflowFinal": single_member,
+            "finalAnswerReady": single_member,
             "summary": summary,
             "result": result_markdown,
             "resultMarkdown": result_markdown,
@@ -2081,55 +2130,18 @@ async def _propose_completion(
             _completion_attempt_key(settings, completion_id, attempt_id),
             completion,
         )
+        _record_completion_decision(
+            settings, envelope, completion_id, attempt_id, status, summary,
+            result["artifactRefs"], "submitted", new_attempt=True, explicit=explicit,
+        )
         acknowledgement = await _completion_ack(redis, settings, completion_id, attempt_id)
     finally:
         redis.close()
     decision = _trim((acknowledgement or {}).get("decision")).lower() or "submitted"
-    runtime_status = "completion_pending"
-    availability = "busy"
-    if decision == "accepted":
-        runtime_status = status
-        availability = "idle" if status == "succeeded" else "blocked"
-    elif decision == "rejected":
-        runtime_status = "running"
-        availability = "busy"
-    active = _load_active_envelope(settings)
-    if _trim(active.get("taskId") or active.get("rootTaskId")) == task_id:
-        active["completionDecision"] = decision
-        active["completionId"] = completion_id
-        if explicit:
-            active["explicitCompletionSubmitted"] = True
-        if decision == "accepted":
-            active["terminal"] = True
-            active["terminalStatus"] = status
-            active["completedAt"] = _now_iso()
-        elif decision == "rejected":
-            active["terminal"] = False
-            active["terminalStatus"] = ""
-        _persist_active_envelope(settings, active)
-    if decision in {"submitted", "deferred"}:
-        asyncio.create_task(
-            _observe_late_completion(
-                settings,
-                completion_id,
-                attempt_id,
-                task_id,
-                status,
-                summary,
-                result["artifactRefs"],
-            )
-        )
-    write_local_status(
-        settings,
-        {
-            "availability": availability,
-            "runtimeStatus": runtime_status,
-            "currentTaskId": task_id,
-            "currentAssignmentId": envelope.get("assignmentId") or envelope.get("workId"),
-            "progress": 100 if decision == "accepted" else 99,
-            "lastSummary": _trim((acknowledgement or {}).get("reason")) or summary,
-            "artifactRefs": result["artifactRefs"],
-        },
+    _record_completion_decision(
+        settings, envelope, completion_id, attempt_id, status,
+        _trim((acknowledgement or {}).get("reason")) or summary,
+        result["artifactRefs"], decision,
     )
     return {
         "ok": True,
@@ -2250,6 +2262,12 @@ async def _tool_team_send(args: dict[str, Any], **_kwargs) -> str:
     settings = load_settings(None)
     if not settings.valid:
         return _team_tool_json_result(settings, "team_send", {"ok": False, "retryable": True, "error": "Redis Team env is incomplete"})
+    if _is_single_member_envelope(settings, _load_active_envelope(settings)):
+        return _team_tool_json_result(settings, "team_send", {
+            "ok": False, "sent": False, "retryable": False,
+            "code": "single_member_no_delegation",
+            "error": "Answer the user and submit team_complete_task; this single-member task does not dispatch other members.",
+        })
     target_values = {
         _trim(args.get(key))
         for key in ("to", "recipient", "targetMemberId", "target_member_id")
@@ -3528,6 +3546,8 @@ class RedisTeamAdapter(BasePlatformAdapter):
         assert self._redis is not None
         while self.is_connected:
             try:
+                if self._redis is not None:
+                    await _reconcile_pending_completion(self._redis, self.settings)
                 for identity in list(self._active_assignments):
                     self._retire_terminal_assignment(identity)
                 status = write_local_status(self.settings)
@@ -4064,8 +4084,9 @@ class RedisTeamAdapter(BasePlatformAdapter):
                 text += f"- Current member artifact root: {member_artifact_root}\n"
             text += (
                 "- The Runtime inherits these IDs for Team tools; omit optional IDs instead of inventing replacements.\n"
-                "- When the assigned work is ready, call team_complete_task once with the actual result. "
-                "If the call is missed, end the turn normally; ClawManager Monitor will send a separate reminder without treating prose as completion.\n"
+                "- Before ending a completed assignment, call team_complete_task once with the full answer in resultMarkdown and any actual artifact refs. "
+                "A text-only answer needs no file. Reuse work already done when correcting a missed receipt; do not repeat research or create unnecessary files. "
+                "If work is unfinished or waiting, report its actual state with Team tools instead of claiming success. Ordinary prose alone is not a completion receipt.\n"
             )
             text += f"- {_assignment_validation_guidance(self.settings, envelope)}\n"
 

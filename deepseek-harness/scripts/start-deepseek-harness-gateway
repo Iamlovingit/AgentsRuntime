@@ -33,6 +33,8 @@ export CLAWMANAGER_LLM_RESOLVED_CONFIG_JSON="${resolved_llm_config}"
 unset RUNTIME_AGENT_CONTROL_TOKEN RUNTIME_AGENT_REPORT_TOKEN
 unset CLAWMANAGER_AGENT_CONTROL_TOKEN CLAWMANAGER_AGENT_REPORT_TOKEN
 
+/usr/local/bin/prepare-deepseek-harness-resources
+
 # ClawManager mounts its supervisor binary over /usr/local/bin/clawmanager-agent.
 # Use the image-owned copy so this DSH-specific subcommand cannot be shadowed by
 # an independently released runtime-agent overlay.

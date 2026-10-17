@@ -4,6 +4,10 @@ import path from "node:path";
 const expectedVersion = "2026.8.1";
 const packageRoot = process.env.OPENCLAW_PACKAGE_ROOT || "/usr/local/lib/node_modules/openclaw";
 const packageJson = JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf8"));
+if (packageJson.version === "2026.10.2") {
+  await import("./patch_browser_proxy_navigation_102.mjs");
+  process.exit(0);
+}
 if (packageJson.version !== expectedVersion) {
   throw new Error(`refusing to patch OpenClaw ${packageJson.version}; expected ${expectedVersion}`);
 }

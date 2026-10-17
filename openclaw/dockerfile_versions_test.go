@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-const targetOpenClawVersion = "2026.8.1"
+const targetOpenClawVersion = "2026.10.2"
 
 func TestImagePinsOpenClawCompatibleRuntimeAndChannelPlugins(t *testing.T) {
 	content, err := os.ReadFile("Dockerfile.openclaw")
@@ -18,24 +18,27 @@ func TestImagePinsOpenClawCompatibleRuntimeAndChannelPlugins(t *testing.T) {
 
 	required := []string{
 		"FROM lscr.io/linuxserver/webtop:ubuntu-kde-version-cc2e18a4@sha256:5005ffafe50117dfd8b28e3c37efd2cf603e37bc3741d472b1540739492d3ee0",
-		"FROM node:22-bookworm-slim@sha256:53ada149d435c38b14476cb57e4a7da73c15595aba79bd6971b547ceb6d018bf AS node-runtime",
-		"RUN test \"$(node --version)\" = \"v22.23.1\"",
-		"npm install -g openclaw@" + targetOpenClawVersion,
+		"FROM node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS node-runtime",
+		"RUN test \"$(node --version)\" = \"v24.21.0\"",
+		"node /pinned/scripts/install-pinned-openclaw.mjs",
 		"patch_memory_core_startup_migration.mjs --patch",
 		"patch_memory_core_startup_migration.mjs --verify",
 		"test_memory_core_startup_migration.mjs",
-		"test_openclaw_8_1_task_migration_contract.mjs",
-		"install-openclaw-plugin @dingtalk-real-ai/dingtalk-connector@0.8.25 --force --accept-capabilities",
-		"install-openclaw-plugin @wecom/wecom-openclaw-plugin@2026.8.17 --force --accept-capabilities",
-		"install-openclaw-plugin @openclaw/feishu@2026.8.1 --force --accept-capabilities",
+		"test_exec_approvals_doctor_migration.mjs",
+		"patch_workspace_publication_102.mjs --patch",
+		"patch_workspace_publication_102.mjs --verify",
+		"test_workspace_publication_102.mjs",
+		"install-openclaw-plugin @dingtalk-real-ai/dingtalk-connector@0.8.26 --force --accept-capabilities",
+		"install-openclaw-plugin @wecom/wecom-openclaw-plugin@2026.9.15 --force --accept-capabilities",
+		"install-openclaw-plugin @openclaw/feishu@2026.10.2 --force --accept-capabilities",
 		"install-openclaw-plugin \"${redis_team_tgz}\" --force --accept-capabilities",
 		"if HOME=/defaults install-openclaw-plugin \"${redis_team_tgz}\" --force >/tmp/plugin-consent-negative.log 2>&1; then exit 1; fi",
-		"ENV CLAWMANAGER_OPENCLAW_VERSION=2026.8.1",
+		"ENV CLAWMANAGER_OPENCLAW_VERSION=2026.10.2",
 		"io.clawmanager.runtime.type=\"openclaw\"",
-		"io.clawmanager.openclaw.version=\"2026.8.1\"",
+		"io.clawmanager.openclaw.version=\"2026.10.2\"",
 		"io.clawmanager.upgrade.strategy=\"openclaw-sqlite-v1\"",
 		"io.clawmanager.upgrade.protocol=\"openclaw-upgrade-v3\"",
-		"ENV CLAWMANAGER_REDIS_TEAM_PLUGIN_VERSION=0.3.0",
+		"ENV CLAWMANAGER_REDIS_TEAM_PLUGIN_VERSION=0.3.1",
 		"HOME=/defaults openclaw config validate",
 	}
 	for _, fragment := range required {
@@ -82,8 +85,8 @@ func TestRedisTeamPluginDeclaresTargetOpenClawBuildBaseline(t *testing.T) {
 		t.Fatalf("parse Redis Team package.json: %v", err)
 	}
 
-	if pkg.Version != "0.3.0" {
-		t.Errorf("Redis Team package version = %q, want %q", pkg.Version, "0.3.0")
+	if pkg.Version != "0.3.1" {
+		t.Errorf("Redis Team package version = %q, want %q", pkg.Version, "0.3.1")
 	}
 	if pkg.OpenClaw.Compat.PluginAPI != ">=2026.8.1" {
 		t.Errorf("Redis Team plugin API range = %q, want 8.1 Runtime lower bound", pkg.OpenClaw.Compat.PluginAPI)

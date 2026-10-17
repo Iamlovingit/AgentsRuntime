@@ -35,7 +35,7 @@ def require(condition, message):
 
 
 class ModelStub:
-    def __init__(self, workspace, api_key):
+    def __init__(self, workspace, api_key, tool_reply=None):
         self.workspace = workspace
         self.calls = []
         self.tools = set()
@@ -97,6 +97,8 @@ class ModelStub:
                             target = owner.workspace / ("allow-fixture" if marker == "SMOKE_ONCE" else "deny-fixture")
                             require(target.parent == owner.workspace and target.name.endswith("-fixture"), "unsafe fixture target")
                             function = {"name": "terminal", "arguments": json.dumps({"command": "rm -rf -- " + str(target)})}
+                    if tool_reply is not None:
+                        function = tool_reply(payload)
                     message = {"role": "assistant", "content": "Local deterministic response " + marker}
                     finish = "stop"
                     if function:
@@ -249,7 +251,7 @@ class Fixture:
             os.chown(item, self.uid, self.uid)
             item.chmod(0o700 if item.is_dir() else 0o600)
         self.env = {key: os.environ[key] for key in ("PATH", "LANG", "PYTHONDONTWRITEBYTECODE", "SSL_CERT_FILE") if key in os.environ}
-        self.env.update({"HOME": str(self.home), "HERMES_HOME": str(self.state), "CLAWMANAGER_WORKSPACE_PATH": str(self.workspace), "PORT": str(self.port), "CLAWMANAGER_GATEWAY_PORT": str(self.port), "CLAWMANAGER_CONTROL_UI_ORIGIN": ORIGIN, "CLAWMANAGER_TRUSTED_PROXY_CIDRS": "192.0.2.0/24", "CLAWMANAGER_HERMES_DESKTOP_WEB_ENABLED": "true", "CLAWMANAGER_HERMES_BACKEND_MODE": "dashboard", "HERMES_DASHBOARD_BASIC_AUTH_USERNAME": "clawmanager", "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD": self.secrets[0], "CLAWMANAGER_LLM_BASE_URL": self.stub.url, "CLAWMANAGER_LLM_API_KEY": self.secrets[1], "OPENAI_BASE_URL": self.stub.url, "OPENAI_API_KEY": self.secrets[1], "HERMES_TUI_TOOLSETS": "terminal,clarify,desktop_ui,desktop_project,computer_use", "TERMINAL_CWD": str(self.workspace), "TERMINAL_ENV": "local", "PYTHONUNBUFFERED": "1"})
+        self.env.update({"HOME": str(self.home), "HERMES_HOME": str(self.state), "CLAWMANAGER_WORKSPACE_PATH": str(self.workspace), "PORT": str(self.port), "CLAWMANAGER_GATEWAY_PORT": str(self.port), "CLAWMANAGER_CONTROL_UI_ORIGIN": ORIGIN, "CLAWMANAGER_TRUSTED_PROXY_CIDRS": "192.0.2.0/24", "CLAWMANAGER_HERMES_DESKTOP_WEB_ENABLED": "true", "CLAWMANAGER_HERMES_BACKEND_MODE": "serve", "HERMES_DASHBOARD_BASIC_AUTH_USERNAME": "clawmanager", "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD": self.secrets[0], "CLAWMANAGER_LLM_BASE_URL": self.stub.url, "CLAWMANAGER_LLM_API_KEY": self.secrets[1], "OPENAI_BASE_URL": self.stub.url, "OPENAI_API_KEY": self.secrets[1], "HERMES_TUI_TOOLSETS": "terminal,clarify,desktop_ui,desktop_project,computer_use", "TERMINAL_CWD": str(self.workspace), "TERMINAL_ENV": "local", "PYTHONUNBUFFERED": "1"})
         self.cookies = http.cookiejar.CookieJar()
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPCookieProcessor(self.cookies))
         self.log = (root / "gateway.log").open("wb")
@@ -269,7 +271,7 @@ class Fixture:
             return error.code, error.read(4 << 20), error.headers
 
     def start(self):
-        self.process = subprocess.Popen(["/usr/local/bin/start-hermes-lite-dashboard"], env=self.env, cwd=self.workspace, stdout=self.log, stderr=subprocess.STDOUT, start_new_session=True, user=self.uid, group=self.uid, extra_groups=[])
+        self.process = subprocess.Popen(["/usr/local/bin/start-hermes-lite-backend"], env=self.env, cwd=self.workspace, stdout=self.log, stderr=subprocess.STDOUT, start_new_session=True, user=self.uid, group=self.uid, extra_groups=[])
         deadline = time.monotonic() + 90
         while time.monotonic() < deadline:
             require(self.process.poll() is None, "gateway exited at startup")
@@ -367,7 +369,7 @@ async def exercise(fixture, cases):
         require(await rpc.call("ping") is not None, "ping result missing")
         error = await rpc.packet("unknown.smoke.method")
         require(isinstance(error.get("error", {}).get("code"), int) and isinstance(error["error"].get("message"), str), "JSON-RPC error shape")
-        for method, params in (("config.get", {}), ("shell.exec", {"command": "echo should-not-run"}), ("session.create", {"source": "web", "profile": "other"}), ("session.create", {"source": "web", "cwd": "/"})):
+        for method, params in (("config.get", {}), ("shell.exec", {"command": "echo should-not-run"}), ("session.create", {"source": "web", "profile": "../other"}), ("session.create", {"source": "web", "cwd": "/"})):
             require("error" in await rpc.packet(method, params), "non-Core RPC accepted: " + method)
         passed("real_rpc_handshake_ping_errors_and_native_rpc_rejection")
 
@@ -404,8 +406,9 @@ async def exercise(fixture, cases):
             await rpc.call("config.set", {"session_id": sid, "key": key, "value": value})
             for missing in ({"key": key, "value": value}, {"session_id": "missing-runtime", "key": key, "value": value}):
                 require("error" in await rpc.packet("config.set", missing), "missing session entered global configuration")
-        for key, value in (("reasoning", "show"), ("fast", "toggle"), ("model", "smoke-model --provider " + provider + " --global"), ("model", "unconfigured-model --provider " + provider + " --session")):
-            require("error" in await rpc.packet("config.set", {"session_id": sid, "key": key, "value": value}), "unsupported/global model setting reached Runtime")
+        # Serve v2 intentionally delegates setting semantics to Hermes rather
+        # than the old fixed RPC whitelist. Test supported session settings and
+        # the ownership boundary, not the removed whitelist's rejection text.
         require((fixture.state / "config.yaml").read_bytes() == config_before, "session-only model options rewrote global config")
         require("providers" in await rpc.call("model.options", {"session_id": sid, "explicit_only": True}), "live session model catalogue unavailable")
         disposable = await rpc.call("session.create", {"source": "web", "cols": 96})

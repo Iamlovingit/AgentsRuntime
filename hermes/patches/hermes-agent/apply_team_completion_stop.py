@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Patch pinned Hermes Agent to stop after an accepted Team completion tool.
+"""Patch pinned Hermes Agent to yield after a durable Team completion tool.
 
 The patch is deliberately narrow and build-failing on upstream drift. It does
 not change generic tool-loop semantics: only the redis_team completion tool's
-authenticated `decision=accepted` result ends the current model turn.
+authenticated accepted/submitted/deferred receipts end the current model turn.
+Pending receipts do not complete the assignment: the existing late-ack watcher
+and ClawManager remain authoritative. The tool result is persisted first.
 """
 
 from __future__ import annotations
@@ -22,8 +24,9 @@ REPLACEMENT = """                # The pinned Hermes release persists every tool
                 # clawmanager-team-completion-stop-v1
                 # An accepted explicit Team completion is already durable in
                 # ClawManager. Do not spend another model iteration asking the
-                # model what to do after its terminal tool succeeded. Rejected
-                # and pending receipts deliberately retain the normal loop.
+                # model what to do after its explicit tool succeeded. Pending
+                # receipts yield to the existing acknowledgement watcher;
+                # rejected receipts retain the normal correction loop.
                 _team_completion_accepted = False
                 for _team_result_message in reversed(messages):
                     if not isinstance(_team_result_message, dict):
@@ -42,14 +45,15 @@ REPLACEMENT = """                # The pinned Hermes release persists every tool
                     _team_completion_accepted = bool(
                         isinstance(_team_result_payload, dict)
                         and _team_result_payload.get("ok") is True
-                        and str(_team_result_payload.get("decision") or "").strip().lower() == "accepted"
+                        and str(_team_result_payload.get("decision") or "").strip().lower() in {"accepted", "submitted", "deferred"}
                     )
                     break
                 if _team_completion_accepted:
-                    _turn_exit_reason = "team_completion_accepted"
+                    _team_decision = str(_team_result_payload.get("decision") or "").strip().lower()
+                    _turn_exit_reason = "team_completion_accepted" if _team_decision == "accepted" else "team_completion_pending"
                     final_response = (
                         agent._strip_think_blocks(assistant_message.content or "").strip()
-                        or "Completion accepted by ClawManager."
+                        or ("Completion accepted by ClawManager." if _team_decision == "accepted" else "Completion submitted; awaiting ClawManager decision.")
                     )
                     break
 

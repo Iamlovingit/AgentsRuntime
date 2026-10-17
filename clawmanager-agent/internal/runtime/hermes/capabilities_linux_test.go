@@ -33,7 +33,7 @@ func desktopAcceptedReleaseFixture(t *testing.T) (string, desktopRelease) {
 		t.Skip("release trust uses image root ownership")
 	}
 	root := t.TempDir()
-	r := desktopRelease{SchemaVersion: 2, HermesRef: desktopWebHermesGitRef, HermesCommit: desktopWebHermesCommit, PackageVersion: desktopWebHermesVersion, NodeVersion: "22.23.2", ContractVersion: 1, RPCProtocol: "hermes-jsonrpc-v1", BackendMode: "dashboard", AuthMode: "password-cookie", Accepted: true, Artifacts: map[string]string{}}
+	r := desktopRelease{SchemaVersion: 2, HermesRef: desktopWebHermesGitRef, HermesCommit: desktopWebHermesCommit, PackageVersion: desktopWebHermesVersion, NodeVersion: "22.23.2", ContractVersion: 1, RPCProtocol: "hermes-jsonrpc-v1", BackendMode: "serve", AuthMode: "password-cookie", Accepted: true, Artifacts: map[string]string{}}
 	files := append([]string(nil), desktopRequiredArtifacts...)
 	for _, script := range desktopAcceptanceScripts {
 		files = append(files, "/usr/local/share/hermes-lite/tests/"+script)
@@ -135,7 +135,7 @@ func TestDesktopCapabilityCandidateStillRequiresActualTrustedArtifacts(t *testin
 			root, release := desktopAcceptedReleaseFixture(t)
 			release.Accepted, release.Acceptance = false, nil
 			writeDesktopReleaseFixture(t, root, release)
-			file := filepath.Join(root, "usr/local/bin/start-hermes-lite-dashboard")
+			file := filepath.Join(root, "usr/local/bin/start-hermes-lite-backend")
 			var err error
 			switch name {
 			case "modified":
@@ -205,7 +205,7 @@ func TestDesktopCapabilityRejectsInconsistentAcceptanceOrInvalidEvidence(t *test
 		{"wrong ref", func(r *desktopRelease) { r.HermesRef = "latest" }},
 		{"wrong commit", func(r *desktopRelease) { r.HermesCommit = strings.Repeat("a", 40) }},
 		{"unknown contract", func(r *desktopRelease) { r.ContractVersion = 2 }},
-		{"wrong backend", func(r *desktopRelease) { r.BackendMode = "serve" }},
+		{"wrong backend", func(r *desktopRelease) { r.BackendMode = "dashboard" }},
 		{"payload mismatch", func(r *desktopRelease) { r.PayloadSHA256 = strings.Repeat("0", 64) }},
 		{"missing CM evidence", func(r *desktopRelease) { delete(r.Acceptance.Reports, "cm_bff_browser") }},
 		{"missing non-native evidence", func(r *desktopRelease) { delete(r.Acceptance.Reports, "lite_non_native") }},
@@ -221,7 +221,7 @@ func TestDesktopCapabilityRejectsInconsistentAcceptanceOrInvalidEvidence(t *test
 			x.Path = "/workspaces/private.json"
 			r.Acceptance.Reports["desktop_rpc"] = x
 		}},
-		{"missing launcher", func(r *desktopRelease) { delete(r.Artifacts, "/usr/local/bin/start-hermes-lite-dashboard") }},
+		{"missing launcher", func(r *desktopRelease) { delete(r.Artifacts, "/usr/local/bin/start-hermes-lite-backend") }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root, r := desktopAcceptedReleaseFixture(t)
@@ -239,7 +239,7 @@ func TestDesktopCapabilityRejectsChangedOrUntrustedArtifacts(t *testing.T) {
 	for _, name := range []string{"modified", "writable", "symlink", "nonroot", "nonexecutable"} {
 		t.Run(name, func(t *testing.T) {
 			root, _ := desktopAcceptedReleaseFixture(t)
-			file := filepath.Join(root, "usr/local/bin/start-hermes-lite-dashboard")
+			file := filepath.Join(root, "usr/local/bin/start-hermes-lite-backend")
 			switch name {
 			case "modified":
 				_ = os.WriteFile(file, []byte("changed"), 0755)

@@ -53,6 +53,7 @@ type Config struct {
 	PublicOrigin          string
 	AllowedOrigins        []string
 	TrustedProxies        []string
+	ProxyPolicyFile       string
 	LLMBaseURL            string
 	LLMAPIKey             string
 	LLMAPIKeySet          bool
@@ -192,6 +193,7 @@ type ProcessStarter interface {
 
 type GatewayHealthChecker interface {
 	WaitReady(context.Context, GatewayStartSpec) error
+	CheckHealth(context.Context, GatewayStartSpec) error
 }
 
 type GatewayState struct {

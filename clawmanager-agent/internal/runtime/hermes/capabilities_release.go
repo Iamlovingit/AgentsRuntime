@@ -9,6 +9,8 @@ import (
 	"path"
 	"sort"
 	"strings"
+
+	"github.com/iamlovingit/clawmanager-agent/internal/gateway"
 )
 
 var desktopAcceptanceScripts = map[string]string{
@@ -72,7 +74,7 @@ func readVerifiedDesktopRelease(root *os.Root) (*desktopRelease, bool) {
 	var release desktopRelease
 	if err != nil || !decodeDesktopEvidenceJSON(data, &release) || release.SchemaVersion != 2 ||
 		release.HermesRef != desktopWebHermesGitRef || release.HermesCommit != desktopWebHermesCommit || release.PackageVersion != desktopWebHermesVersion || release.NodeVersion != "22.23.2" ||
-		release.ContractVersion != 1 || release.RPCProtocol != "hermes-jsonrpc-v1" || release.BackendMode != "dashboard" || release.AuthMode != "password-cookie" {
+		release.ContractVersion != 1 || release.RPCProtocol != "hermes-jsonrpc-v1" || release.BackendMode != "serve" || release.AuthMode != "password-cookie" {
 		return nil, false
 	}
 	// bool's zero value cannot distinguish an explicit false from omitted/null.
@@ -139,6 +141,9 @@ func desktopArtifactPath(file string) bool {
 	if path.Clean(file) != file || strings.ContainsAny(file, "\\\r\n\x00") {
 		return false
 	}
+	if file == gateway.HermesManagedProxyPolicyMarker {
+		return true
+	}
 	for _, prefix := range []string{"/opt/hermes-agent/", "/usr/local/lib/python3.13/", "/usr/local/share/hermes-lite/patches/", "/usr/local/share/hermes-lite/tests/"} {
 		if strings.HasPrefix(file, prefix) {
 			return true
@@ -163,12 +168,14 @@ func desktopDigest(value []byte) string {
 // Keep this list aligned with the release assembler; additional artifacts are
 // welcome, but a manifest cannot omit the code/launcher that enforces the mode.
 var desktopRequiredArtifacts = []string{
+	"/opt/hermes-agent/plugins/platforms/redis_team/adapter.py", "/opt/hermes-agent/plugins/platforms/redis_team/plugin.yaml",
+	"/usr/local/share/hermes-lite/patches/apply_team_completion_stop.py", "/usr/local/share/hermes-lite/patches/apply_profile_external_skill_dedupe.py",
 	"/usr/local/bin/start-hermes-lite-runtime", "/usr/local/bin/hermes-apply-runtime-config",
 	"/usr/local/share/clawmanager/hermes/skills/redis-team-protocol/SKILL.md", "/usr/local/share/clawmanager/hermes/skills/redis-team-protocol/skill.json",
-	"/usr/local/bin/start-hermes-lite-dashboard", "/usr/local/bin/clawmanager-agent", "/usr/local/bin/node", "/usr/local/bin/hermes-lite-entrypoint", "/usr/local/bin/python3.13",
+	"/usr/local/bin/start-hermes-lite-backend", "/usr/local/bin/clawmanager-agent", "/usr/local/bin/node", "/usr/local/bin/hermes-lite-entrypoint", "/usr/local/bin/python3.13",
 	"/usr/local/lib/libpython3.13.so.1.0",
 	"/opt/hermes-agent/hermes_cli/web_server.py", "/opt/hermes-agent/hermes_cli/runtime_provider.py", "/opt/hermes-agent/hermes_cli/lite_gateway_boundary.py", "/opt/hermes-agent/hermes_cli/lite_non_native.py", "/opt/hermes-agent/tui_gateway/server.py", "/opt/hermes-agent/tui_gateway/methods_session.py", "/opt/hermes-agent/model_tools.py",
-	"/opt/hermes-agent/hermes_cli/web_dist/index.html", "/opt/hermes-agent/hermes_cli/tui_dist/entry.js",
+	"/opt/hermes-agent/hermes_cli/tui_dist/entry.js",
 	"/opt/hermes-agent/agent/tool_executor.py",
 	"/opt/hermes-agent/hermes_cli/env_loader.py", "/opt/hermes-agent/hermes_cli/lite_environment.py",
 	"/opt/hermes-agent/.venv/bin/hermes", "/opt/hermes-agent/pyproject.toml", "/opt/hermes-agent/uv.lock", "/opt/hermes-agent/package-lock.json",

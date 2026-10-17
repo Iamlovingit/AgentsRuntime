@@ -4,13 +4,14 @@ import path from "node:path";
 const expectedVersion = "2026.8.1";
 const packageRoot = process.env.OPENCLAW_PACKAGE_ROOT || "/usr/local/lib/node_modules/openclaw";
 const packageJson = JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf8"));
-if (packageJson.version !== expectedVersion) {
+if (![expectedVersion, "2026.10.2"].includes(packageJson.version)) {
   throw new Error(`refusing to patch OpenClaw ${packageJson.version}; expected ${expectedVersion}`);
 }
 
 const target = path.join(packageRoot, "dist", "extensions", "memory-core", "doctor-contract-api.js");
 const patching = process.argv.includes("--patch");
 const patchMarker = "CLAWMANAGER_SAFE_IDEMPOTENT_MEMORY_ARCHIVE";
+const readFileBinding = packageJson.version === "2026.10.2" ? "fs" : "fs$1";
 const migrationStart = 'id: "memory-core-legacy-sidecar-index-to-agent-sqlite",';
 const declarations = [
   "\tasync migrateLegacyState(params) {",
@@ -63,7 +64,7 @@ const patchedArchiveCollision = [
   "\t\tconst allArchivesMatch = await Promise.all(existingSources.map(async (sourcePath) => {",
   "\t\t\tconst archivedPath = `${sourcePath}.migrated`;",
   "\t\t\tif (!await legacyStateFileExists(archivedPath)) return false;",
-  "\t\t\tconst [sourceBytes, archivedBytes] = await Promise.all([fs$1.readFile(sourcePath), fs$1.readFile(archivedPath)]);",
+  `\t\t\tconst [sourceBytes, archivedBytes] = await Promise.all([${readFileBinding}.readFile(sourcePath), ${readFileBinding}.readFile(archivedPath)]);`,
   "\t\t\treturn sourceBytes.equals(archivedBytes);",
   "\t\t})).then((matches) => matches.every(Boolean)).catch(() => false);",
   "\t\tif (allArchivesMatch) {",

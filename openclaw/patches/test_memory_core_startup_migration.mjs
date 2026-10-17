@@ -11,10 +11,11 @@ const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-memory-archi
 try {
   const targetDir = path.join(fixtureRoot, "dist", "extensions", "memory-core");
   fs.mkdirSync(targetDir, { recursive: true });
-  fs.writeFileSync(path.join(fixtureRoot, "package.json"), JSON.stringify({ version: "2026.8.1", type: "module" }));
+  fs.writeFileSync(path.join(fixtureRoot, "package.json"), JSON.stringify({ version: process.env.TEST_OPENCLAW_CORE_VERSION || "2026.8.1", type: "module" }));
   const fixturePath = path.join(targetDir, "doctor-contract-api.js");
   fs.writeFileSync(fixturePath, [
     "const fs$1 = { readFile: async (file) => Buffer.from(process.env.ARCHIVE_DIFFERS === '1' && file.endsWith('.migrated') ? 'archive' : 'source') };",
+    "const fs = fs$1;",
     "async function legacyStateFileExists() { return true; }",
     "async function archiveLegacyMemorySidecar(params) {",
     "\tconst existingSources = [params.source.legacyPath];",

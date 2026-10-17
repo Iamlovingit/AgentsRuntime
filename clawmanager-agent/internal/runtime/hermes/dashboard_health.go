@@ -99,7 +99,7 @@ func (h *healthChecker) waitDashboardReady(ctx context.Context, spec gateway.Gat
 // All authentication state is scoped to this instance/generation and call.
 func (h *healthChecker) CheckHealth(ctx context.Context, spec gateway.GatewayStartSpec) error {
 	if !truthy(envValue(spec.Env, "CLAWMANAGER_HERMES_DESKTOP_WEB_ENABLED")) {
-		return dashboardError("unsupported_hermes_protocol", "continuous probing requires the managed Lite profile")
+		return h.http.CheckHealth(ctx, spec)
 	}
 	probe, err := newDashboardProbe(h.cfg, spec)
 	if err != nil {

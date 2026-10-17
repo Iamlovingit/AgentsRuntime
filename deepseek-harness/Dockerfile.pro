@@ -38,6 +38,7 @@ RUN set -eux; \
     npm cache clean --force
 
 COPY deepseek-harness/config/managed.cordis.patch.yml /usr/local/share/deepseek-harness/managed.cordis.patch.yml
+COPY deepseek-harness/scripts/prepare-deepseek-harness-resources /usr/local/bin/prepare-deepseek-harness-resources
 COPY deepseek-harness/scripts/start-deepseek-harness-pro /usr/local/bin/start-deepseek-harness-pro
 COPY deepseek-harness/config/pro-agent-config.yaml /defaults/openclaw-agent/config.yaml
 COPY deepseek-harness/config/deepseek-harness-browser.desktop /defaults/.config/autostart/deepseek-harness-browser.desktop
@@ -45,12 +46,14 @@ COPY --from=agent-builder /out/openclaw-agent /usr/local/bin/openclaw-agent
 COPY --from=clawmanager-agent-builder /out/clawmanager-agent /usr/local/bin/clawmanager-agent
 
 RUN set -eux; \
+    sed -i 's/\r$//' /usr/local/bin/prepare-deepseek-harness-resources; \
     sed -i 's/\r$//' /usr/local/bin/start-deepseek-harness-pro; \
-    chmod 0755 /usr/local/bin/start-deepseek-harness-pro /usr/local/bin/openclaw-agent /usr/local/bin/clawmanager-agent; \
+    chmod 0755 /usr/local/bin/prepare-deepseek-harness-resources /usr/local/bin/start-deepseek-harness-pro /usr/local/bin/openclaw-agent /usr/local/bin/clawmanager-agent; \
     rm -f /defaults/.config/autostart/openclaw-browser.desktop; \
     rm -f /etc/openclaw-agent/config.yaml
 
 ENV CLAWMANAGER_RUNTIME_TYPE=deepseek-harness \
     DSH_HOME=/config/.dsh \
+    DSH_NOFILE_SOFT=65536 \
     DSH_TELEMETRY_DISABLED=1 \
     TITLE="DeepSeek Harness Pro"

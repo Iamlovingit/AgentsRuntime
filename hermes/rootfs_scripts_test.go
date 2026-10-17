@@ -42,7 +42,7 @@ func TestLiteDockerfilePackagesCanonicalTeamAdapterAndCoHostedSupervisor(t *test
 		t.Fatalf("read Lite supervisor: %v", err)
 	}
 	for _, want := range []string{
-		"start-hermes-lite-dashboard",
+		"start-hermes-lite-backend",
 		"hermes gateway run --accept-hooks --no-supervise",
 		"plugins/platforms/redis_team/adapter.py",
 		"hermes-apply-runtime-config",
@@ -77,7 +77,7 @@ func TestDockerfileAppliesVersionLockedTeamCompletionStopPatch(t *testing.T) {
 		`_team_result_message.get("name") != "team_complete_task"`,
 		`_team_result_payload.get("ok") is True`,
 		`== "accepted"`,
-		`_turn_exit_reason = "team_completion_accepted"`,
+		`_turn_exit_reason = "team_completion_accepted" if`,
 	} {
 		if !strings.Contains(string(patch), want) {
 			t.Fatalf("Hermes completion stop patch missing %q", want)

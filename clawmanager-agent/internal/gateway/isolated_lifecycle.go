@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/iamlovingit/clawmanager-agent/internal/heartbeat"
 )
 
 type isolatedProcessLog struct {
@@ -266,46 +268,32 @@ func (m *GatewayManager) runIsolatedGateway(ctx context.Context, record *gateway
 	record.state.State, record.state.HealthAt, record.state.UpdatedAt = "running", time.Now().UTC(), time.Now().UTC()
 	m.notifyGatewayStateChangedLocked()
 	m.mu.Unlock()
-	ticker := time.NewTicker(15 * time.Second)
-	defer ticker.Stop()
+	healthFailures := heartbeat.NewFailureTracker(heartbeat.DefaultFailureThreshold)
 	for {
+		timer := time.NewTimer(m.nextGatewayHealthDelay())
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
+		case <-process.Done:
+			timer.Stop()
+			failure = fmt.Errorf("gateway_process_exited")
+			return
+		case <-timer.C:
+		}
+		probeFailure := m.probeGatewayHealth(ctx, spec, process.PID)
+		if ctx.Err() != nil {
+			return
+		}
+		// An exited process is terminal; a transient probe failure is not.
+		select {
 		case <-process.Done:
 			failure = fmt.Errorf("gateway_process_exited")
 			return
-		case <-ticker.C:
-			if failure = m.Health(); failure != nil && failure.Error() != "clock_reference_unavailable" {
-				return
-			}
-			checker, ok := m.health.(interface {
-				CheckHealth(context.Context, GatewayStartSpec) error
-			})
-			if !ok {
-				continue
-			}
-			probeCtx, probeCancel := context.WithTimeout(ctx, 5*time.Second)
-			failure = checker.CheckHealth(probeCtx, spec)
-			if failure == nil {
-				if verifier, ok := m.starter.(interface {
-					VerifyListener(GatewayStartSpec, int) error
-				}); ok {
-					failure = verifier.VerifyListener(spec, process.PID)
-				}
-			}
-			probeCancel()
-			m.mu.Lock()
-			record.state.HealthAt = time.Now().UTC()
-			if failure != nil {
-				record.state.State = "unhealthy"
-				record.state.ErrorMessage = safeGatewayError(failure)
-				m.notifyGatewayStateChangedLocked()
-			}
-			m.mu.Unlock()
-			if failure != nil {
-				return
-			}
+		default:
+		}
+		if !m.observeGatewayHealth(record.state.GatewayID, req.InstanceID, req.Generation, process.PID, &healthFailures, probeFailure) {
+			return
 		}
 	}
 }

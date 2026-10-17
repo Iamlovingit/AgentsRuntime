@@ -29,3 +29,24 @@ Pushes to `main` that change DeepSeek Harness or either shared agent dependency
 automatically publish multi-architecture `deepseek-harness` and
 `deepseek-harness-lite` images through `.github/workflows/docker-ghcr.yml`.
 Each run updates `latest` and the current Shanghai-date tag.
+
+## Host resource prerequisites
+
+Both images raise the DSH process soft `nofile` limit to `65536` (bounded by
+the container hard limit) before starting `dsh web`. Override it with
+`DSH_NOFILE_SOFT` only when the deployment has a deliberate lower limit.
+
+Linux inotify limits are node-level kernel settings and cannot be changed by
+an unprivileged runtime container. Apply the following persistent settings on
+every Kubernetes node that may schedule DeepSeek Harness or desktop runtime
+pods:
+
+```text
+fs.inotify.max_user_instances = 1024
+fs.inotify.max_user_watches = 524288
+```
+
+Store them in `/etc/sysctl.d/99-clawmanager-inotify.conf` and apply them with
+the operating system's normal sysctl provisioning. The startup guard prints
+the effective nofile and inotify values and warns when the host limits are
+below these recommendations.

@@ -19,8 +19,57 @@ const ControlTokenHeader = gateway.ControlTokenHeader
 
 const openClawUpgradeOperationTimeout = 15 * time.Minute
 
+func writeUpgradeOperationError(w http.ResponseWriter, err error) {
+	if errors.Is(err, gateway.ErrWriterLeaseActive) {
+		// Keep the old controller's retry marker while newer controllers use the
+		// typed HTTP status. Never turn an in-flight writer into rollback authority.
+		http.Error(w, "runtime reconciliation is required before migration: "+err.Error(), http.StatusLocked)
+		return
+	}
+	http.Error(w, err.Error(), http.StatusConflict)
+}
+
 func NewControlHandler(cfg gateway.Config, manager *gateway.GatewayManager, reporter gateway.HeartbeatReporter) http.Handler {
 	mux := http.NewServeMux()
+	if cfg.ProxyPolicyFile != "" {
+		policy := gateway.NewProxyPolicyStore(cfg.ProxyPolicyFile, cfg.Namespace)
+		mux.HandleFunc("/v1/proxy-policy", func(w http.ResponseWriter, r *http.Request) {
+			if !authorizeControl(cfg, w, r) {
+				return
+			}
+			if r.Method == http.MethodGet {
+				writeJSON(w, http.StatusOK, policy.Snapshot())
+				return
+			}
+			if r.Method != http.MethodPut {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			var req gateway.ProxyPolicyUpdate
+			r.Body = http.MaxBytesReader(w, r.Body, 16384)
+			decoder := json.NewDecoder(r.Body)
+			decoder.DisallowUnknownFields()
+			if err := decoder.Decode(&req); err != nil {
+				http.Error(w, "invalid proxy policy", http.StatusBadRequest)
+				return
+			}
+			var trailing any
+			if err := decoder.Decode(&trailing); err != io.EOF {
+				http.Error(w, "invalid proxy policy", http.StatusBadRequest)
+				return
+			}
+			result, err := policy.Update(req)
+			if errors.Is(err, gateway.ErrProxyPolicyConflict) {
+				http.Error(w, err.Error(), http.StatusConflict)
+				return
+			}
+			if err != nil {
+				http.Error(w, "proxy policy update failed", http.StatusBadRequest)
+				return
+			}
+			writeJSON(w, http.StatusOK, result)
+		})
+	}
 
 	// Kubernetes probes must not carry the control token. This endpoint only
 	// exposes traffic readiness; all management operations remain authenticated.
@@ -164,7 +213,7 @@ func NewControlHandler(cfg gateway.Config, manager *gateway.GatewayManager, repo
 		defer cancel()
 		result, err := manager.MigrateSessionSQLite(operationCtx, req)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusConflict)
+			writeUpgradeOperationError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, result)
@@ -235,7 +284,7 @@ func NewControlHandler(cfg gateway.Config, manager *gateway.GatewayManager, repo
 		defer cancel()
 		result, err := manager.RestoreSessionSQLite(operationCtx, req)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusConflict)
+			writeUpgradeOperationError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, result)
@@ -317,7 +366,7 @@ func NewControlHandler(cfg gateway.Config, manager *gateway.GatewayManager, repo
 		case "acquire":
 			lease, err := manager.AcquireWriterLease(body.WorkspaceUpgradeRequest, body.LeaseToken, ttl)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusConflict)
+				writeUpgradeOperationError(w, err)
 				return
 			}
 			writeJSON(w, http.StatusCreated, lease)
@@ -330,7 +379,7 @@ func NewControlHandler(cfg gateway.Config, manager *gateway.GatewayManager, repo
 			writeJSON(w, http.StatusOK, lease)
 		case "release":
 			if err := manager.ReleaseWriterLease(body.WorkspaceUpgradeRequest); err != nil {
-				http.Error(w, err.Error(), http.StatusConflict)
+				writeUpgradeOperationError(w, err)
 				return
 			}
 			writeJSON(w, http.StatusOK, map[string]bool{"released": true})

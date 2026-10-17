@@ -20,7 +20,7 @@ const source = (await fs.readFile(distPath, "utf8"))
     "const definePluginEntry = (entry) => entry;",
   )
   ;
-const testSource = source + "\nexport { RedisClient, completionAckKey, completionKey };\n";
+const testSource = source + "\nexport { RedisClient, completionAckKey, completionKey, createTurnAnswerCapture };\n";
 const pluginModule = await import(
   `data:text/javascript;base64,${Buffer.from(testSource).toString("base64")}`
 );
@@ -57,6 +57,14 @@ const config = {
 };
 
 const sessionResult = "开发任务已完成，产物已经保存并可交给 Reviewer 验收。";
+const callbackAnswer = "本轮完整答案：来自十二个已核对的资讯来源，不需要额外文件。";
+const capture = pluginModule.createTurnAnswerCapture();
+capture.capture({text:callbackAnswer});
+capture.capture({text:'private reasoning',isReasoning:true});
+capture.capture({text:'NO_REPLY'});
+capture.close();
+capture.capture({text:'late other turn'});
+assert.equal(capture.text,callbackAnswer);
 let dispatchMode = "assignment";
 const hookHandlers = new Map();
 async function dispatchThroughHooks() {
@@ -174,6 +182,10 @@ const context = {
         const turn = adapter.resolveTurn();
         assert.equal(turn.ctxPayload.conversation.kind, "group");
         assert.equal(turn.ctxPayload.access.commands.authorized, false);
+        if (dispatchMode === "callback-only") {
+          await turn.delivery.deliverWithProviderMessageSending({text:callbackAnswer});
+          return {};
+        }
         await dispatchThroughHooks();
         return {};
       },
@@ -299,6 +311,24 @@ try {
     0,
     "a valid turn-end monitor record must not enter the dead-letter stream",
   );
+
+  // Exercise the channel's real delivery callback, not a prefilled hook record
+  // or direct completion tool invocation. Both assignment kinds share capture.
+  dispatchMode = "callback-only";
+  for (const single of [false,true]) {
+    const messageId=`callback-${single}-${runId}`;
+    const rootTaskId=`team-${teamId}-task-${single ? 'single' : 'ordinary'}-${runId}`;
+    const callbackEnvelope={...envelope,messageId,idempotencyKey:messageId,taskId:rootTaskId,rootTaskId,rootMessageId:messageId,
+      ...(single ? {from:'clawmanager',intent:'run_task',executionType:'single_member',executorMemberKey:memberId,assignmentId:'single-member',workId:'single-member'} : {})};
+    await redis.command('XADD',inboxKey,'*','payload',JSON.stringify(callbackEnvelope));
+    const end=await waitFor(async()=>streamPayloads(await redis.command('XRANGE',eventsKey,'-','+')).find(e=>e.eventKind==='turn_finished_without_completion' && (e.messageId===messageId || e.sourceMessageId===messageId)));
+    assert.equal(end.resultMarkdown,callbackAnswer);
+    assert.equal(end.hadAssistantNarrative,true);
+    assert.equal(end.immediateRecoveryEligible,true);
+    assert.equal(end.turnObservationOutcome,'completion_receipt_gap');
+    assert.equal(end.visibleToChat,false);
+    assert.equal(end.rootTaskTerminal,false);
+  }
 
   dispatchMode = "context-retryable";
   const contextMessageId = `consumer-context-${runId}`;

@@ -2639,7 +2639,7 @@ function appendRedisTeamCompletionGuidance(text, envelope) {
   const guidance = [
     body,
     "",
-	"Redis Team delivery rule: when the assigned work is ready, call team_complete_task once with status, summary, resultMarkdown, and artifact refs. Use team_send for a real assignment, handoff, question, blocker, or intermediate milestone, not as a substitute for the completion receipt. If the call is missed, end the current turn normally; ClawManager Monitor will send a separate reminder without treating prose as completion.",
+	"Redis Team delivery rule: before ending a completed assignment, call team_complete_task once with status, summary, the full answer in resultMarkdown, and any actual artifact refs. A text-only answer needs no file. Use team_send for a real assignment, handoff, question, blocker, or intermediate milestone, not as a substitute for the completion receipt. Reuse work already done when correcting a missed receipt; do not repeat research or create unnecessary files. If work is unfinished or waiting, report its actual state with Team tools instead of claiming success. Ordinary prose alone is not a completion receipt.",
     "Progress visibility rule: when you create an execution plan or reach a meaningful milestone, call team_update_progress with status=\"running\", a concise summary, and eventKind set to leader_plan, worker_plan, worker_progress, or leader_synthesis as appropriate. Use assignment_check_result only when replying to a ClawManager Monitor envelope carrying a monitor checkId. Do not expose hidden reasoning or tool logs; only publish user-visible plans, phase summaries, blockers, verification notes, and recovery status.",
     `Output language rule: use ${locale} for every user-visible plan, assignment, progress summary, resultMarkdown, and final synthesis. Preserve source code, API names, file names, and necessary technical terms in their original form.`,
     "Shared artifact rule: prefer team_artifact_write/read/list/mkdir. These tools enforce current-Team isolation and cooperative permissions. The /team prefix is only the canonical link returned to ClawManager in pooled Lite runtimes. To inspect a Team HTML or other Team file in Browser, call team_artifact_preview and navigate to its returned signed HTTP URL; never use file:// or start a temporary file server.",
@@ -2984,6 +2984,22 @@ function normalizeAssistantSessionText(text) {
 
 function usableFallbackAssistantText(text) {
   return normalizeAssistantSessionText(text);
+}
+
+// Capturing a user-facing delivery and projecting it into chat are independent.
+// Keep only this dispatch's answer; never promote it to a completion proposal.
+function createTurnAnswerCapture() {
+  let text = "";
+  let closed = false;
+  return {
+    capture(payload) {
+      if (closed || payload?.isReasoning || payload?.isError || isIncompleteTurnDelivery(payload)) return;
+      const answer = usableFallbackAssistantText(payload?.text || "");
+      if (answer) text = answer;
+    },
+    close() { closed = true; },
+    get text() { return text; },
+  };
 }
 
 function summarizeCompletionText(text, fallback = "Redis Team task completed") {
@@ -4129,6 +4145,15 @@ function normalizeEnvelopeWorkspaceContext(envelope) {
   return envelope;
 }
 
+function isSingleMemberEnvelope(cfg, envelope) {
+  return envelope?.executionType === "single_member" &&
+    trim(envelope.executorMemberKey) === trim(cfg.memberId) &&
+    ["clawmanager", "clawmanager-monitor"].includes(trim(envelope.from)) &&
+    isClawManagerRootTaskRef(envelope.rootTaskId || envelope.taskId) &&
+    trim(envelope.rootTaskId || envelope.taskId).startsWith(`team-${cfg.teamId}-task-`) &&
+    trim(envelope.assignmentId || envelope.workId) === "single-member";
+}
+
 function normalizeEnvelope(raw) {
   if (!raw || typeof raw !== "object") return null;
   const text = raw.text || raw.prompt || raw.rawPayload || "";
@@ -4157,6 +4182,10 @@ function normalizeEnvelope(raw) {
     rootMessageId: raw.rootMessageId || raw.root_message_id || textRootMessageId || raw.messageId || raw.message_id,
     workId: raw.workId || raw.work_id || raw.assignmentId || raw.assignment_id,
     assignmentId: raw.assignmentId || raw.assignment_id || raw.workId || raw.work_id,
+    executionType: raw.executionType,
+    executorMemberKey: raw.executorMemberKey,
+    contextTaskId: raw.contextTaskId,
+    followupContext: raw.followupContext,
     dependsOn: Array.isArray(raw.dependsOn) ? raw.dependsOn.filter(Boolean) : [],
     teamId: raw.teamId || raw.team_id,
     from: raw.from || raw.sender || raw.memberId || raw.member_id || "unknown",
@@ -4654,7 +4683,8 @@ function createRuntime(api) {
       isLeaderRosterMember(currentMember) ||
       isRosterLeaderTarget(roster, cfg.memberId) ||
       isLeaderMember(cfg);
-    const assignmentResultOnly = leaderMediated && !currentIsLeader;
+    const singleMember = isSingleMemberEnvelope(cfg, envelope);
+    const assignmentResultOnly = leaderMediated && !currentIsLeader && !singleMember;
     const completionStatus = ["failed", "cancelled"].includes(trim(meta.completionStatus).toLowerCase())
       ? "failed"
       : "succeeded";
@@ -4667,10 +4697,10 @@ function createRuntime(api) {
     // A Leader receives Worker result envelopes while coordinating the root
     // task. Those source envelopes are useful for audit, but they are not the
     // identity of the Leader's final synthesis lane.
-    const assignmentId = currentIsLeader ? "leader-final-synthesis" : inheritedAssignmentId;
+    const assignmentId = currentIsLeader && !singleMember ? "leader-final-synthesis" : inheritedAssignmentId;
     const workId = assignmentId;
     const revision = Math.max(1, intFrom(meta.revision ?? envelope.revision, 1));
-    const completionScope = currentIsLeader ? "root" : assignmentId || "root";
+    const completionScope = currentIsLeader || singleMember ? "root" : assignmentId || "root";
     // Completion idempotency belongs to the authenticated assignment contract,
     // not an arbitrary id an Agent happened to repeat in its tool arguments.
     // This makes same-assignment retries stable while allowing a correction,
@@ -4681,8 +4711,8 @@ function createRuntime(api) {
     const inReplyTo = trim(meta.inReplyTo) || envelope.messageId;
 
     const attemptId = trim(meta.attemptId) || ("attempt_" + randomUUID());
-    const workflowFinal = meta.workflowFinal === undefined ? currentIsLeader : boolFrom(meta.workflowFinal, false);
-    const finalAnswerReady = meta.finalAnswerReady === undefined ? currentIsLeader : boolFrom(meta.finalAnswerReady, false);
+    const workflowFinal = singleMember || (meta.workflowFinal === undefined ? currentIsLeader : boolFrom(meta.workflowFinal, false));
+    const finalAnswerReady = singleMember || (meta.finalAnswerReady === undefined ? currentIsLeader : boolFrom(meta.finalAnswerReady, false));
     const remainingActions = Array.isArray(meta.remainingActions) ? meta.remainingActions.filter(Boolean) : [];
 		await drainActiveReviewPersistence();
 		const durableTurnFacts = await readTurnFacts(cfg, envelope);
@@ -4718,7 +4748,7 @@ function createRuntime(api) {
         attemptId,
 		...completionProvenance,
         assignmentResultOnly: assignmentResultOnly || undefined,
-        rootTaskTerminal: leaderMediated ? (!assignmentResultOnly && currentIsLeader) : undefined,
+        rootTaskTerminal: singleMember || (leaderMediated ? (!assignmentResultOnly && currentIsLeader) : undefined),
         workId,
         assignmentId,
         canonicalWorkId: workId,
@@ -4912,7 +4942,7 @@ function createRuntime(api) {
       isLeaderRosterMember(currentMember) ||
       isRosterLeaderTarget(roster, cfg.memberId) ||
       isLeaderMember(cfg);
-    const assignmentResultOnly = isLeaderMediatedRoster(roster) && !currentIsLeader;
+    const assignmentResultOnly = isLeaderMediatedRoster(roster) && !currentIsLeader && !isSingleMemberEnvelope(cfg, envelope);
     const assignmentId = trim(envelope?.assignmentId || envelope?.workId) || undefined;
     const revision = Math.max(1, intFrom(meta.revision ?? envelope?.revision, 1));
     const completionScope = assignmentResultOnly ? assignmentId || cfg.memberId : "root";
@@ -5003,6 +5033,8 @@ function createRuntime(api) {
     params = params || {};
 		let dependencyAdvisory = null;
     if (!cfg.enabled) throw new Error("Redis Team channel is disabled");
+    const boundEnvelope = activeEnvelope || await readJson(privateActiveAssignmentPath(cfg));
+    if (isSingleMemberEnvelope(cfg, boundEnvelope)) return teamToolNormalizationError("single_member_no_delegation", { retryable: false, message: "This is a single-member root. Answer the user and submit team_complete_task; do not dispatch another member." });
     await ensureDirs(cfg);
 		const normalized = await normalizeTeamSendParams(cfg, params, activeEnvelope);
 		if (normalized.error) return normalized.error;
@@ -7355,6 +7387,7 @@ export default definePluginEntry({
                     const contextDispatchStartedAt = Date.now();
                     let contextActiveResult = null;
                     let contextDispatchFailed = false;
+                    const contextAnswer = createTurnAnswerCapture();
                     try {
                       contextActiveResult = await runtime.withActiveEnvelope(envelope, async () =>
 						runtime.withNarrativeProjection(envelope, null, async () => dispatchInboundRedisTeamGroupWithRuntime({
@@ -7390,7 +7423,7 @@ export default definePluginEntry({
                             "- requiresCompletion: false",
                           ],
                         },
-                        deliver: async () => {},
+                        deliver: async (payload) => { contextAnswer.capture(payload); },
                         onRecordError: (err) => {
                           ctx.log?.error?.(
                             "redis-team: record context notification failed: " + (err?.message || String(err)),
@@ -7411,6 +7444,8 @@ export default definePluginEntry({
                         "redis-team: context notification dispatch skipped after error: " +
                           (err?.message || String(err)),
                       );
+                    } finally {
+                      contextAnswer.close();
                     }
                     // Context/reminder turns are not business assignments, but
                     // their model/tool turn still needs the same accounting as
@@ -7445,9 +7480,9 @@ export default definePluginEntry({
                           contextDispatchResult,
                           contextDispatchStartedAt,
                         );
-                        const fallbackText = narratives.length
+                        const fallbackText = contextAnswer.text || (narratives.length
                           ? narratives[narratives.length - 1].text
-                          : "";
+                          : "");
                         const turnEvent = turnFinishedWithoutCompletionEvent(envelope, {
                           assistantNarratives: narratives,
                           fallbackText,
@@ -7524,6 +7559,7 @@ export default definePluginEntry({
 
                   let dispatchFailed = false;
                   let deliveredViaCallback = false;
+                  const turnAnswer = createTurnAnswerCapture();
                   const dispatchStartedAt = Date.now();
                   const emittedNarrativeHashes = new Set();
 					const emitAgentNarrative = async (narrativeText, source, media = {}, sourceMeta = {}) => {
@@ -7600,6 +7636,7 @@ export default definePluginEntry({
                         return;
                       }
                       if (isIncompleteTurnDelivery(payload)) incompleteTurnDetected = true;
+                      turnAnswer.capture(payload);
                       ctx.log?.info?.("redis-team: delivering reply for " + envelope.messageId);
                       try {
                         const projected = await emitAgentNarrative(
@@ -7652,6 +7689,7 @@ export default definePluginEntry({
                       }),
                     cfg);
                   } finally {
+                    turnAnswer.close();
                     stopHeartbeat();
                     await activityObserver.stop(
                       runtime.isActiveTaskCompleted(envelope.taskId)
@@ -7673,9 +7711,9 @@ export default definePluginEntry({
                     dispatchStartedAt,
                   );
                   const lastToolOutcome = turnToolEvidence.lastToolOutcome;
-                  const fallbackText = assistantNarratives.length
+                  const fallbackText = turnAnswer.text || (assistantNarratives.length
                     ? assistantNarratives[assistantNarratives.length - 1].text
-                    : "";
+                    : "");
                   const routing = await activeMemberRouting(cfg, activeResult?.outbound);
                   const workerOutboundText = routing.workerDelivery
                     ? trim(activeResult?.outbound?.message?.text)

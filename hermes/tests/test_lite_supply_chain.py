@@ -392,6 +392,29 @@ class ExecutionRunnerTests(unittest.TestCase):
 
 
 class BoundaryTests(unittest.TestCase):
+    def test_managed_lease_rotation_expiry_and_namespace_fail_closed(self):
+        with tempfile.TemporaryDirectory() as root:
+            file = Path(root) / "policy.json"
+            with patch.dict(os.environ, {"CLAWMANAGER_PROXY_POLICY_FILE": str(file), "CLAWMANAGER_PROXY_POLICY_NAMESPACE": "tenant"}):
+                guard = boundary.LiteGatewayBoundary(None)
+                def publish(addresses, namespace="tenant", expires=160000):
+                    file.write_text(json.dumps({"contract": 1, "namespace": namespace, "proxies": addresses, "expires_at_ms": expires}))
+                with patch.object(boundary.time, "time", return_value=100):
+                    self.assertEqual("untrusted_gateway_peer", guard.denial(self.scope()))
+                    publish(["10.23.4.8"])
+                    self.assertIsNone(guard.denial(self.scope()))
+                    publish(["10.23.4.9"])
+                    self.assertEqual("untrusted_gateway_peer", guard.denial(self.scope()))
+                    self.assertIsNone(guard.denial(self.scope(peer="10.23.4.9")))
+                    for addresses, namespace, expires in [(["10.23.4.8"], "other", 160000), (["10.23.4.8"], "tenant", 100000), (["10.23.4.0/24"], "tenant", 160000), (["10.23.4.8", 1], "tenant", 160000)]:
+                        publish(addresses, namespace, expires)
+                        self.assertEqual("untrusted_gateway_peer", guard.denial(self.scope()))
+                    file.write_text("{broken")
+                    self.assertEqual("untrusted_gateway_peer", guard.denial(self.scope()))
+                    self.assertIsNone(guard.denial(self.scope(peer="127.0.0.1", origin=None, method="GET")))
+                    publish(["10.23.4.8"])
+                    self.assertIsNone(guard.denial(self.scope()))
+
     def setUp(self):
         self.env = patch.dict(os.environ, {
             "CLAWMANAGER_CONTROL_UI_ORIGIN": "https://manager.example",

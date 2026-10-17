@@ -11,14 +11,14 @@ const manifest = JSON.parse(fs.readFileSync(path.join(root, "openclaw.plugin.jso
 const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
 const dist = fs.readFileSync(path.join(root, "dist", "index.js"), "utf8");
 if (manifest.id !== "redis-team") throw new Error(`unexpected plugin id: ${manifest.id}`);
-if (pkg.version !== "0.3.0") {
+if (pkg.version !== "0.3.1") {
   throw new Error(`unexpected package version: ${pkg.version}`);
 }
 if (pkg.openclaw?.compat?.pluginApi !== ">=2026.8.1") {
   throw new Error("package.json must require the OpenClaw 2026.8.1 plugin API baseline");
 }
-if (pkg.openclaw?.build?.openclawVersion !== "2026.8.1") {
-  throw new Error("package.json must declare the tested OpenClaw 2026.8.1 build baseline");
+if (pkg.openclaw?.build?.openclawVersion !== "2026.10.2") {
+  throw new Error("package.json must declare the tested OpenClaw 2026.10.2 build baseline");
 }
 if (!manifest.channelConfigs?.["redis-team"]?.schema) {
   throw new Error("OpenClaw 2026.8.1 channel manifest must publish redis-team channelConfigs schema");
@@ -235,7 +235,11 @@ if (
 ) {
   throw new Error("Assigned validation publishing must be handled by the team-scope guard");
 }
-const deliverStart = dist.indexOf("deliver: async (payload) => {");
+// Context-only turns also capture reply evidence now; inspect the formal
+// assignment callback for its stronger post-completion suppression contract.
+const formalTurnStart = dist.indexOf("const turnAnswer = createTurnAnswerCapture()");
+if (formalTurnStart < 0) throw new Error("formal turn answer capture is missing");
+const deliverStart = dist.indexOf("deliver: async (payload) => {", formalTurnStart);
 const deliverEnd = dist.indexOf("onRecordError:", deliverStart);
 if (deliverStart < 0 || deliverEnd < 0) throw new Error("unable to locate Redis Team deliver callback");
 const deliverBody = dist.slice(deliverStart, deliverEnd);
