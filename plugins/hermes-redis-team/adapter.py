@@ -307,6 +307,27 @@ def presence_key(settings: RedisTeamSettings) -> str:
     return f"{_key_prefix(settings)}:presence"
 
 
+async def _team_maintenance_enabled(redis, settings: RedisTeamSettings) -> bool:
+    """Use the existing maintenance key; never claim a complete backup ACK.
+
+    Pausing dispatch does not prove that model/tool callbacks, presence or
+    subprocess writers have drained. The backup coordinator must establish
+    those separate conditions before it can certify a consistent checkpoint.
+    """
+    raw = await redis.command("GET", f"{_key_prefix(settings)}:maintenance")
+    if not raw:
+        return False
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8")
+    try:
+        value = json.loads(str(raw))
+        if isinstance(value, dict):
+            return value.get("enabled") is True
+    except (TypeError, ValueError):
+        pass
+    return str(raw).strip().lower() in {"1", "true", "on"}
+
+
 def dlq_key(settings: RedisTeamSettings) -> str:
     return f"{_key_prefix(settings)}:dlq"
 
@@ -3667,6 +3688,9 @@ class RedisTeamAdapter(BasePlatformAdapter):
         pending_batches = 0
         while self.is_connected:
             try:
+                if await _team_maintenance_enabled(redis, self.settings):
+                    await asyncio.sleep(0.2)
+                    continue
                 command = [
                     "XREADGROUP",
                     "GROUP",
@@ -3680,6 +3704,10 @@ class RedisTeamAdapter(BasePlatformAdapter):
                 command.extend(["STREAMS", inbox_key(self.settings), read_id])
                 response = await redis.command(*command)
                 messages = _parse_stream_response(response)
+                if await _team_maintenance_enabled(redis, self.settings):
+                    read_id = "0"
+                    pending_batches = 0
+                    continue
                 if read_id != ">":
                     if not messages:
                         read_id = ">"
@@ -3692,6 +3720,10 @@ class RedisTeamAdapter(BasePlatformAdapter):
                                 "Redis Team: pending drain batch limit reached; switching to new messages"
                             )
                 for raw in messages:
+                    if await _team_maintenance_enabled(redis, self.settings):
+                        read_id = "0"
+                        pending_batches = 0
+                        break
                     await self._handle_redis_message(raw)
             except asyncio.CancelledError:
                 raise
