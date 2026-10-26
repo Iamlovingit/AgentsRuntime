@@ -138,6 +138,13 @@ func LoadConfigFromEnv() (Config, error) {
 		cfg.LLMReasoningControl = controls
 	}
 
+	if raw := os.Getenv("CLAWMANAGER_LLM_VISION"); strings.TrimSpace(raw) != "" {
+		vision, err := gateway.ParseVisionCapabilities(raw)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.LLMVision = vision
+	}
 	if cfg.ControlToken == "" {
 		return Config{}, errors.New("RUNTIME_AGENT_CONTROL_TOKEN is required")
 	}

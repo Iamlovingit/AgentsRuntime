@@ -15,6 +15,7 @@ const ControlTokenHeader = gateway.ControlTokenHeader
 
 func NewControlHandler(cfg gateway.Config, manager *gateway.GatewayManager, reporter gateway.HeartbeatReporter) http.Handler {
 	mux := http.NewServeMux()
+	registerConfirmedStopRoutes(mux, cfg, manager)
 
 	mux.HandleFunc("/v1/health", func(w http.ResponseWriter, r *http.Request) {
 		if !authorizeControl(cfg, w, r) {
@@ -71,6 +72,10 @@ func NewControlHandler(cfg gateway.Config, manager *gateway.GatewayManager, repo
 			return
 		}
 		if err := manager.DeleteGateway(r.Context(), gatewayID); err != nil {
+			if errors.Is(err, gateway.ErrGatewayStopConflict) {
+				http.Error(w, err.Error(), http.StatusConflict)
+				return
+			}
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -167,7 +172,7 @@ func writeCreateGatewayError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, gateway.ErrRuntimeType), errors.Is(err, gateway.ErrWorkspacePath):
 		http.Error(w, err.Error(), http.StatusBadRequest)
-	case errors.Is(err, gateway.ErrDraining), errors.Is(err, gateway.ErrNoFreePort), errors.Is(err, gateway.ErrStaleGeneration):
+	case errors.Is(err, gateway.ErrDraining), errors.Is(err, gateway.ErrNoFreePort), errors.Is(err, gateway.ErrStaleGeneration), errors.Is(err, gateway.ErrGatewayStopConflict):
 		http.Error(w, err.Error(), http.StatusConflict)
 	case errors.Is(err, gateway.ErrGatewayStartFailed):
 		http.Error(w, err.Error(), http.StatusInternalServerError)

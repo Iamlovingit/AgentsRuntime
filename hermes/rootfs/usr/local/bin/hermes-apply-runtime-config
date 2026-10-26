@@ -1964,6 +1964,22 @@ if has_llm_config:
 
     data["model"] = model_cfg
 
+# Managed image analysis must use the same owner-authenticated Gateway.
+if "CLAWMANAGER_LLM_VISION" in os.environ:
+    vision_flags = json.loads(os.environ["CLAWMANAGER_LLM_VISION"])
+    if not isinstance(vision_flags, dict) or any(type(v) is not bool for v in vision_flags.values()):
+        raise ValueError("invalid CLAWMANAGER_LLM_VISION")
+    if not base_url or not api_key:
+        raise ValueError("managed vision requires Gateway URL and token")
+    auxiliary = data.setdefault("auxiliary", {})
+    if not isinstance(auxiliary, dict):
+        raise ValueError("auxiliary must be an object")
+    vision = auxiliary.setdefault("vision", {})
+    if not isinstance(vision, dict):
+        raise ValueError("auxiliary.vision must be an object")
+    vision.update(provider="custom", model="auto", base_url=base_url,
+                  api_key="", api_mode="chat_completions", extra_body={})
+
 skill_sources = apply_skill_config(data, hermes_home)
 messaging_env_updates, messaging_sources, configured_platforms, gateway_written, channel_error = apply_messaging_config(
     data,

@@ -861,6 +861,11 @@ func configWithRequestLLMEnv(cfg gateway.Config, req gateway.CreateGatewayReques
 		}
 		resolved.LLMReasoningControl = controls
 	}
+	vision, err := gateway.ResolveVisionCapabilities(cfg, req)
+	if err != nil {
+		return gateway.Config{}, err
+	}
+	resolved.LLMVision = vision
 	return resolved, nil
 }
 
@@ -903,6 +908,12 @@ func mergeOpenClawLLMConfig(config map[string]any, cfg gateway.Config) {
 	}
 	if len(cfg.LLMModelIDs) > 0 {
 		provider["models"] = buildOpenClawProviderModels(provider["models"], cfg.LLMModelIDs, cfg.LLMReasoning, cfg.LLMReasoningControl)
+		for _, entry := range provider["models"].([]any) {
+			model := entry.(map[string]any)
+			if vision, managed := cfg.LLMVision[configStringValue(model["id"])]; managed {
+				model["input"] = gateway.VisionInputModalities(model["input"], vision)
+			}
+		}
 
 		agents := ensureObject(config, "agents")
 		defaults := ensureObject(agents, "defaults")

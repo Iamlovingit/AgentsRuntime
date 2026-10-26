@@ -28,6 +28,10 @@ func WriteGatewayConfig(cfg gateway.Config, req gateway.CreateGatewayRequest, wo
 		return err
 	}
 
+	vision, err := gateway.ResolveVisionCapabilities(cfg, req)
+	if err != nil {
+		return err
+	}
 	configPath := filepath.Join(opencodeHome, "opencode.json")
 	doc := map[string]any{
 		"$schema": "https://opencode.ai/config.json",
@@ -40,7 +44,7 @@ func WriteGatewayConfig(cfg gateway.Config, req gateway.CreateGatewayRequest, wo
 					"baseURL": baseURL,
 					"apiKey":  "{env:CLAWMANAGER_LLM_API_KEY}",
 				},
-				"models": modelsMap(models),
+				"models": modelsMap(models, vision),
 			},
 		},
 		"enabled_providers":  []string{clawmanagerProviderID},
@@ -128,7 +132,7 @@ func appendModels(models []string, raw string) []string {
 	return models
 }
 
-func modelsMap(models []string) map[string]any {
+func modelsMap(models []string, visionMaps ...map[string]bool) map[string]any {
 	out := make(map[string]any, len(models))
 	for _, id := range models {
 		name := id
@@ -136,6 +140,11 @@ func modelsMap(models []string) map[string]any {
 			name = "ClawManager Auto"
 		}
 		out[id] = map[string]any{"name": name}
+		if len(visionMaps) > 0 {
+			if vision, managed := visionMaps[0][id]; managed {
+				out[id].(map[string]any)["capabilities"] = map[string]any{"input": gateway.VisionInputModalities(nil, vision), "output": []string{"text"}}
+			}
+		}
 	}
 	return out
 }

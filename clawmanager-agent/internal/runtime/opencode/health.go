@@ -3,6 +3,7 @@ package opencode
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -71,7 +72,17 @@ func (h *healthChecker) probeOnce(ctx context.Context, spec gateway.GatewayStart
 	_ = conn.Close()
 
 	username, password := authFromSpecEnv(spec.Env)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+address+"/global/health", nil)
+	v2 := false
+	for _, item := range spec.Env {
+		if item == "OPENCODE_RUNTIME_MAJOR=2" {
+			v2 = true
+		}
+	}
+	endpoint := "/global/health"
+	if v2 {
+		endpoint = "/api/info"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+address+endpoint, nil)
 	if err != nil {
 		return err
 	}
@@ -84,12 +95,24 @@ func (h *healthChecker) probeOnce(ctx context.Context, spec gateway.GatewayStart
 		return fmt.Errorf("opencode health unavailable: %w", err)
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
-	if resp.StatusCode >= 500 {
+	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("opencode health returned %d", resp.StatusCode)
 	}
-	if resp.StatusCode == http.StatusUnauthorized {
-		return fmt.Errorf("opencode health unauthorized")
+	var payload struct {
+		Version string `json:"version"`
+		PID     int    `json:"pid"`
+		Healthy bool   `json:"healthy"`
+		OK      bool   `json:"ok"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&payload); err != nil {
+		return fmt.Errorf("opencode health invalid response: %w", err)
+	}
+	if v2 {
+		if !strings.HasPrefix(payload.Version, "2.") || payload.PID <= 0 {
+			return fmt.Errorf("opencode v2 server info is not ready")
+		}
+	} else if !payload.Healthy && !payload.OK {
+		return fmt.Errorf("opencode v1 health is not ready")
 	}
 	return nil
 }

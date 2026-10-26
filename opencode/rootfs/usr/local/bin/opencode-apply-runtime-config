@@ -23,28 +23,39 @@ if [ -z "${OPENCODE_SERVER_PASSWORD:-}" ]; then
   export OPENCODE_SERVER_PASSWORD="${CLAWMANAGER_INSTANCE_TOKEN:-${CLAWMANAGER_LLM_API_KEY:-${api_key}}}"
 fi
 
-cat >"${config_path}" <<EOF
-{
-  "\$schema": "https://opencode.ai/config.json",
-  "model": "clawmanager/${model_id}",
-  "provider": {
-    "clawmanager": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "ClawManager AI Gateway",
-      "options": {
-        "baseURL": "${base_url}",
-        "apiKey": "{env:CLAWMANAGER_LLM_API_KEY}"
-      },
-      "models": {
-        "${model_id}": { "name": "${model_id}" },
-        "auto": { "name": "ClawManager Auto" }
-      }
-    }
-  },
-  "enabled_providers": ["clawmanager"],
-  "disabled_providers": ["openai", "anthropic", "google", "amazon-bedrock", "azure", "groq", "mistral", "deepseek"]
-}
-EOF
+python3 - "${config_path}" "${base_url}" "${model_id}" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+target, base_url, selected = sys.argv[1:]
+model_ids = [selected, "auto"]
+raw_models = os.environ.get("CLAWMANAGER_LLM_MODEL", "").strip()
+if raw_models:
+    decoded = json.loads(raw_models) if raw_models.startswith("[") else [raw_models]
+    if not isinstance(decoded, list) or any(not isinstance(m, str) for m in decoded):
+        raise ValueError("invalid model catalogue")
+    model_ids.extend(decoded)
+models = {m: {"name": "ClawManager Auto" if m == "auto" else m} for m in dict.fromkeys(model_ids)}
+raw_vision = os.environ.get("CLAWMANAGER_LLM_VISION", "").strip()
+if raw_vision:
+    vision = json.loads(raw_vision)
+    if not isinstance(vision, dict) or any(type(v) is not bool for v in vision.values()):
+        raise ValueError("invalid CLAWMANAGER_LLM_VISION")
+    for model, config in models.items():
+        if model in vision:
+            config["capabilities"] = {"input": ["text", "image"] if vision[model] else ["text"], "output": ["text"]}
+doc = {"$schema": "https://opencode.ai/config.json", "model": "clawmanager/" + selected,
+       "provider": {"clawmanager": {"npm": "@ai-sdk/openai-compatible", "name": "ClawManager AI Gateway",
+           "options": {"baseURL": base_url, "apiKey": "{env:CLAWMANAGER_LLM_API_KEY}"}, "models": models}},
+       "enabled_providers": ["clawmanager"],
+       "disabled_providers": ["openai", "anthropic", "google", "amazon-bedrock", "azure", "groq", "mistral", "deepseek"]}
+destination = Path(target)
+temporary = destination.with_suffix(".json.tmp")
+temporary.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+temporary.replace(destination)
+PY
 
 chmod 640 "${config_path}" || true
 export OPENCODE_CONFIG="${config_path}"

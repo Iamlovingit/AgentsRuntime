@@ -14,8 +14,13 @@ import (
 )
 
 type gatewayRecord struct {
-	state   GatewayState
-	process ManagedProcess
+	state         GatewayState
+	process       ManagedProcess
+	stopOperation string
+	stopBusy      bool
+	stopConfirmed bool
+	deletePending bool
+	deleteBusy    bool
 }
 
 type GatewayManager struct {
@@ -24,10 +29,11 @@ type GatewayManager struct {
 	ports   *PortAllocator
 	health  GatewayHealthChecker
 
-	mu       sync.RWMutex
-	draining bool
-	gateways map[string]*gatewayRecord
-	changes  chan struct{}
+	mu        sync.RWMutex
+	draining  bool
+	gateways  map[string]*gatewayRecord
+	changes   chan struct{}
+	stopEpoch string
 }
 
 func NewGatewayManager(cfg Config, starter ProcessStarter, ports *PortAllocator) *GatewayManager {
@@ -47,12 +53,13 @@ func NewGatewayManager(cfg Config, starter ProcessStarter, ports *PortAllocator)
 		ports.SetBlockSize(cfg.GatewayPortBlockSize)
 	}
 	return &GatewayManager{
-		cfg:      cfg,
-		starter:  starter,
-		ports:    ports,
-		health:   health,
-		gateways: map[string]*gatewayRecord{},
-		changes:  make(chan struct{}, 1),
+		cfg:       cfg,
+		starter:   starter,
+		ports:     ports,
+		health:    health,
+		gateways:  map[string]*gatewayRecord{},
+		changes:   make(chan struct{}, 1),
+		stopEpoch: newStopEpoch(),
 	}
 }
 
@@ -86,6 +93,12 @@ func (m *GatewayManager) CreateGateway(_ context.Context, req CreateGatewayReque
 	}
 
 	gatewayID := gatewayID(req.InstanceID, req.Generation)
+	for _, record := range m.gateways {
+		if record.state.InstanceID == req.InstanceID && (record.stopOperation != "" || record.deletePending) {
+			m.mu.Unlock()
+			return CreateGatewayResponse{}, ErrGatewayStopConflict
+		}
+	}
 	if existing, ok := m.gateways[gatewayID]; ok {
 		resp := createGatewayResponse(existing.state)
 		m.mu.Unlock()
@@ -284,11 +297,37 @@ func createGatewayResponse(state GatewayState) CreateGatewayResponse {
 
 func (m *GatewayManager) DeleteGateway(ctx context.Context, gatewayID string) error {
 	m.mu.Lock()
-	process := m.detachGatewayLocked(gatewayID)
-	m.mu.Unlock()
-	if process.Stop != nil {
-		_ = process.Stop(ctx)
+	record := m.gateways[gatewayID]
+	if record == nil {
+		m.mu.Unlock()
+		return nil
 	}
+	// A startup worker may not yet have attached its child. Never detach that
+	// record and report success while the worker can still launch a process.
+	if record.stopOperation != "" || record.deleteBusy || record.state.State == "starting" {
+		m.mu.Unlock()
+		return ErrGatewayStopConflict
+	}
+	record.deletePending, record.deleteBusy = true, true
+	process := record.process
+	m.mu.Unlock()
+	var stopErr error
+	if process.Stop != nil {
+		stopErr = process.Stop(ctx)
+	} else if process.PID > 0 {
+		stopErr = ErrGatewayStopUnsupported
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.gateways[gatewayID] != record {
+		return ErrGatewayStopConflict
+	}
+	record.deleteBusy = false
+	if stopErr != nil {
+		return stopErr
+	}
+	record.deletePending = false
+	m.detachGatewayLocked(gatewayID)
 	return nil
 }
 
@@ -417,7 +456,7 @@ func (m *GatewayManager) stopGatewayLocked(ctx context.Context, id string) {
 
 func (m *GatewayManager) detachGatewayLocked(id string) ManagedProcess {
 	record, ok := m.gateways[id]
-	if !ok {
+	if !ok || record.stopOperation != "" || record.deletePending {
 		return ManagedProcess{}
 	}
 	m.ports.Release(record.state.Port)
@@ -482,7 +521,7 @@ func (m *GatewayManager) watchGatewayProcess(id string, done <-chan error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	record, ok := m.gateways[id]
-	if !ok {
+	if !ok || record.process.Done != done || record.stopOperation != "" || record.deletePending {
 		return
 	}
 	now := time.Now().UTC()
@@ -522,6 +561,10 @@ func (m *GatewayManager) stopProcessAsync(process ManagedProcess) {
 func (m *GatewayManager) usedSlotsLocked() int {
 	count := 0
 	for _, record := range m.gateways {
+		if record.stopOperation != "" || record.deletePending {
+			count++ // Retain the reserved slot until a future fenced migration releases it.
+			continue
+		}
 		switch record.state.State {
 		case "running", "starting":
 			count++
@@ -697,21 +740,37 @@ func (s *ExecProcessStarter) StartGateway(ctx context.Context, spec GatewayStart
 	}
 	done := make(chan error, 1)
 	notifyDone := make(chan error, 1)
+	exited := make(chan struct{})
 	go func() {
 		err := cmd.Wait()
+		close(exited)
 		done <- err
 		notifyDone <- err
 	}()
 
 	return ManagedProcess{
-		PID:  cmd.Process.Pid,
-		Done: notifyDone,
+		PID:          cmd.Process.Pid,
+		Done:         notifyDone,
+		GracefulStop: newGracefulGatewayStop(cmd, exited),
 		Stop: func(stopCtx context.Context) error {
+			select {
+			case <-exited:
+				return nil
+			default:
+			}
 			timeout := s.cfg.ProcessStopTimeout
 			if timeout <= 0 {
 				timeout = 20 * time.Second
 			}
-			return stopGatewayCommand(stopCtx, cmd, done, timeout)
+			err := stopGatewayCommand(stopCtx, cmd, done, timeout)
+			select {
+			case <-exited:
+				// SIGTERM produces an ExitError even when shutdown completed.
+				// Legacy DELETE confirms only the leader, never backup safety.
+				return nil
+			default:
+				return err
+			}
 		},
 	}, nil
 }

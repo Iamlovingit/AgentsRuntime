@@ -18,11 +18,12 @@ RUN set -eux; \
 
 FROM lscr.io/linuxserver/webtop:ubuntu-kde
 
-ARG OPENCODE_VERSION=1.18.13
+ARG OPENCODE_VERSION=2.0.27
 ARG TARGETARCH
 ARG DEBIAN_FRONTEND=noninteractive
 
-ENV OPENCODE_CONFIG_DIR=/config/.opencode \
+ENV OPENCODE_RUNTIME_MAJOR=2 \
+    OPENCODE_CONFIG_DIR=/config/.opencode \
     CLAWMANAGER_RUNTIME_TYPE=opencode \
     PUID=1000 \
     PGID=1000 \
@@ -40,6 +41,7 @@ RUN set -eux; \
         curl \
         git \
         openssh-client \
+        python3 \
         ripgrep \
         tar \
         unzip \
@@ -53,14 +55,12 @@ RUN set -eux; \
         arm64|aarch64) oc_arch="arm64" ;; \
         *) echo "Unsupported architecture for OpenCode: ${arch}" >&2; exit 1 ;; \
     esac; \
-    curl -fsSL "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-${oc_arch}.tar.gz" \
+    curl -fsSL "https://registry.npmjs.org/@opencode/cli-linux-${oc_arch}/-/cli-linux-${oc_arch}-${OPENCODE_VERSION}.tgz" \
         -o /tmp/opencode.tar.gz; \
     mkdir -p /tmp/opencode-extract; \
     tar -xzf /tmp/opencode.tar.gz -C /tmp/opencode-extract; \
-    bin="$(find /tmp/opencode-extract -type f -name opencode | head -1)"; \
-    test -n "${bin}"; \
-    install -m 0755 "${bin}" /usr/local/bin/opencode; \
-    opencode --version || opencode --help >/dev/null; \
+    install -m 0755 /tmp/opencode-extract/package/bin/opencode /usr/local/bin/opencode; \
+    opencode --version | grep -Fx "opencode v${OPENCODE_VERSION}"; \
     rm -rf /tmp/opencode.tar.gz /tmp/opencode-extract
 
 COPY --from=clawmanager-agent-builder /out/clawmanager-agent /usr/local/bin/clawmanager-agent
@@ -74,6 +74,7 @@ RUN set -eux; \
         /usr/local/bin/start-opencode-web \
         /usr/local/bin/start-opencode-pro-web \
         /usr/local/bin/start-opencode-terminal \
+        /usr/local/bin/opencode-pro-session.py \
         /usr/local/bin/opencode-apply-runtime-config \
         /custom-cont-init.d/99-opencode-config \
         /etc/s6-overlay/s6-rc.d/opencode-agent/run \
@@ -85,6 +86,7 @@ RUN set -eux; \
         /usr/local/bin/start-opencode-web \
         /usr/local/bin/start-opencode-pro-web \
         /usr/local/bin/start-opencode-terminal \
+        /usr/local/bin/opencode-pro-session.py \
         /usr/local/bin/opencode-apply-runtime-config \
         /custom-cont-init.d/99-opencode-config \
         /etc/s6-overlay/s6-rc.d/opencode-agent/run \
