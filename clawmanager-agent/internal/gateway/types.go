@@ -59,6 +59,7 @@ type Config struct {
 	LLMAPIKeySet          bool
 	LLMAPIKeyEnvName      string
 	LLMModelIDs           []string
+	LLMVision             map[string]bool
 	LLMModelsQualified    bool
 	LLMReasoning          map[string]bool
 	LLMReasoningControl   map[string]string
@@ -185,6 +186,9 @@ type ManagedProcess struct {
 	PID  int
 	Stop func(context.Context) error
 	Done <-chan error
+	// GracefulStop never escalates to SIGKILL. Success confirms leader reaping
+	// AND disappearance of its process group, not arbitrary detached children.
+	GracefulStop func(context.Context) error
 }
 
 type ProcessStarter interface {

@@ -99,6 +99,10 @@ func writeHermesConfigYAML(path string, cfg gateway.Config) error {
 		return fmt.Errorf("read hermes config: %w", err)
 	}
 	base := stripManagedBlock(string(existing))
+	base, err = mergeManagedVisionYAML(base, cfg)
+	if err != nil {
+		return err
+	}
 	block := buildManagedYAML(cfg)
 	content := strings.TrimRight(base, "\r\n")
 	if content != "" {
