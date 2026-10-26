@@ -18,7 +18,7 @@ The repository currently documents these runtime images:
 ## Repository layout
 
 - `hermes/`: Hermes runtime image, built from the repository root so it can include the shared `clawmanager-agent/`
-- `hermes-lite`: lite Hermes runtime image, built from the repository root with the Hermes Dockerfile
+- `hermes-lite`: headless Hermes Desktop Web candidate, built with `hermes/Dockerfile.lite`; see [release gates](hermes/HERMES-LITE-RELEASE.md) and [operations](hermes/HERMES-LITE-OPERATIONS.md)
 - `openclaw/`: OpenClaw runtime image, built from the repository root so it can include the shared `clawmanager-agent/`
 - `openclaw-lite`: lite OpenClaw runtime image, built from the repository root with `openclaw/Dockerfile.openclaw`
 - `openclaw-shell/`: Alpine-based OpenClaw shell runtime image, built from the repository root so it can reuse the OpenClaw agent implementation under `openclaw/`
@@ -30,11 +30,57 @@ The repository currently documents these runtime images:
 Before adding or upgrading a channel plugin in OpenClaw Lite, read the
 [OpenClaw Lite Channel Adapter Guide](clawmanager-agent/docs/openclaw-lite-channel-adaptation.md).
 
+## OpenClaw version and Team compatibility
+
+The canonical `openclaw` (Pro) and `openclaw-lite` builds both use
+`openclaw/Dockerfile.openclaw` and pin OpenClaw **2026.10.2** with Node
+**24.21.0**. The [version lock](openclaw/openclaw102.lock.json) records core
+package integrity and managed channel versions; the build verifies both the
+download and the installed version. This does not upgrade `openclaw-shell`.
+Overlay Dockerfiles inherit their base image's core version and do not replace
+the canonical release build.
+
+Runtime Team adapters support compatible ClawManager Leader-mediated and
+single-member delivery contracts. Continuous-collaboration chat, functional
+avatars, the shared-file editor, and the `@member` selector belong to the
+**ClawManager App**. Use compatible App and Runtime versions; publishing a
+Runtime image neither updates the UI nor migrates or restarts existing instances.
+Data-format upgrades require the validated ClawManager migration workflow, not
+a direct image replacement.
+
+## GitHub Actions and image tags
+
+The [image workflow](.github/workflows/docker-ghcr.yml) runs on matching source
+changes pushed to `main`, or manually on the repository's default branch. The
+branch check also requires the selected branch to be the default branch.
+Feature-branch pushes, `v*` tags, and README-only changes do not publish images.
+The current path filter excludes `plugins/**`; after a plugin-only change is
+merged, run the workflow manually.
+
+Unless a manual run specifies `image_namespace`, images use the lowercased
+repository namespace:
+
+```text
+ghcr.io/<owner>/<repo>/openclaw:latest
+ghcr.io/<owner>/<repo>/openclaw-lite:latest
+```
+
+For example, `Stark-Han/AgentsRuntime` publishes under
+`ghcr.io/stark-han/agentsruntime/`; a fork does not update upstream packages.
+Successful amd64 and arm64 builds are combined into manifests tagged `latest`
+and `vYYYY.M.D` (Asia/Shanghai). Check the final publish job and manifest, not just
+a successful architecture build. Tags can move: deploy a verified `@sha256`
+digest for repeatable upgrades. A failed or cancelled run is not a new release.
+
 ## Manual builds
 
 You can build each runtime image directly with Docker from the repository root.
 
 ### Hermes
+
+The Pro image pins Hermes Agent `0.21.0` (`v2026.8.31`) and opens the native
+Hermes Desktop application inside Webtop. The former terminal and Web Dashboard
+autostart paths are not included in the Pro image.
 
 ```bash
 docker build \
@@ -47,7 +93,7 @@ docker build \
 
 ```bash
 docker build \
-  -f hermes/Dockerfile \
+  -f hermes/Dockerfile.lite \
   -t hermes-lite:local \
   .
 ```
@@ -152,14 +198,10 @@ docker buildx build \
 
 ### Hermes Lite
 
-```bash
-docker buildx build \
-  --platform linux/amd64,linux/arm64 \
-  -f hermes/Dockerfile \
-  -t <registry>/hermes-lite:latest \
-  --push \
-  .
-```
+The unified `docker-ghcr.yml` image matrix builds and publishes Hermes Lite with
+`hermes/Dockerfile.lite`, alongside the other Pro and Lite runtime images.
+Complete the [Hermes Lite release gates](hermes/HERMES-LITE-RELEASE.md) before
+deploying a tested immutable digest. Validate each target architecture separately.
 
 ### OpenClaw
 

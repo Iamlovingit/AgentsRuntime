@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,6 +33,66 @@ func TestControlHandlerRequiresControlToken(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("GET /v1/health status = %d, want 401", resp.StatusCode)
+	}
+}
+
+func TestUpgradeStandbyReadinessAndActivation(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.UpgradeID = "81"
+	mgr := NewGatewayManager(cfg, &fakeStarter{nextPID: 4242}, NewPortAllocator(func(int) bool { return false }))
+	srv := httptest.NewServer(NewControlHandler(cfg, mgr, &fakeReporter{}))
+	defer srv.Close()
+
+	before, err := http.Get(srv.URL + "/readyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = before.Body.Close()
+	if before.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("standby readiness = %d, want 503", before.StatusCode)
+	}
+	body := bytes.NewBufferString(`{"rollout_id":"81"}`)
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/openclaw/upgrade/activate", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(ControlTokenHeader, cfg.ControlToken)
+	req.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("activate status = %d, want 200", response.StatusCode)
+	}
+	after, err := http.Get(srv.URL + "/readyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = after.Body.Close()
+	if after.StatusCode != http.StatusOK {
+		t.Fatalf("activated readiness = %d, want 200", after.StatusCode)
+	}
+}
+
+func TestFullWorkspaceSnapshotEndpointIsDisabled(t *testing.T) {
+	cfg := testConfig(t)
+	mgr := NewGatewayManager(cfg, &fakeStarter{nextPID: 4242}, NewPortAllocator(func(int) bool { return false }))
+	srv := httptest.NewServer(NewControlHandler(cfg, mgr, &fakeReporter{}))
+	defer srv.Close()
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/openclaw/snapshots", bytes.NewBufferString(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(ControlTokenHeader, cfg.ControlToken)
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("snapshot endpoint status = %d, want 404", response.StatusCode)
 	}
 }
 
@@ -205,7 +266,7 @@ func TestHermesManagerUsesAdjacentRequestedSinglePorts(t *testing.T) {
 	cfg.GatewayPortStart = 20000
 	cfg.GatewayPortEnd = 20003
 	cfg.GatewayPortBlockSize = 1
-	cfg.GatewayCommand = []string{"start-hermes-dashboard-gateway"}
+	cfg.GatewayCommand = []string{"start-hermes-desktop"}
 	starter := &fakeStarter{nextPID: 4242}
 	mgr := NewGatewayManager(cfg, starter, NewPortAllocator(func(int) bool { return false }))
 
@@ -521,6 +582,9 @@ func TestCreateGatewayReleasesFullPortBlockAfterStartupFailure(t *testing.T) {
 }
 
 func TestControlHandlerPassesRequestEnvironmentToGatewayProcess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Team workspace aliases require Unix symbolic links")
+	}
 	cfg := testConfig(t)
 	redisTeamPlugin := filepath.Join(t.TempDir(), "redis-team")
 	if err := os.MkdirAll(filepath.Join(redisTeamPlugin, "dist"), 0o755); err != nil {
@@ -607,6 +671,10 @@ func (f *fakeHealthChecker) WaitReady(context.Context, GatewayStartSpec) error {
 	return f.err
 }
 
+func (f *fakeHealthChecker) CheckHealth(context.Context, GatewayStartSpec) error {
+	return f.err
+}
+
 type blockingHealthChecker struct {
 	done chan error
 }
@@ -622,6 +690,10 @@ func (h *blockingHealthChecker) WaitReady(ctx context.Context, _ GatewayStartSpe
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func (h *blockingHealthChecker) CheckHealth(context.Context, GatewayStartSpec) error {
+	return nil
 }
 
 func (h *blockingHealthChecker) succeed() {

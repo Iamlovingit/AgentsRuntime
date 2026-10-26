@@ -11,16 +11,20 @@ import (
 )
 
 type Profile struct {
-	runtimeType string
+	runtimeType  string
+	desktopWeb   bool
+	capabilities *gateway.HealthCapabilities
 }
 
 func NewProfile(runtimeType string) Profile {
-	return Profile{runtimeType: strings.ToLower(strings.TrimSpace(runtimeType))}
+	return Profile{runtimeType: strings.ToLower(strings.TrimSpace(runtimeType)), desktopWeb: desktopWebEnabled()}
 }
 
 func (p Profile) Type() string {
 	return p.runtimeType
 }
+
+func (p Profile) IsolatedGatewayLifecycle() bool { return p.desktopWeb }
 
 func (p Profile) DisplayName() string {
 	return "Hermes"
@@ -40,10 +44,16 @@ func (p Profile) Defaults() gateway.RuntimeDefaults {
 }
 
 func (p Profile) GatewayCommand(string) []string {
-	return []string{"start-hermes-dashboard-gateway"}
+	if p.desktopWeb {
+		return []string{"start-hermes-lite-runtime"}
+	}
+	return []string{"start-hermes-desktop"}
 }
 
 func (p Profile) GatewayEnv(base []string, cfg gateway.Config, req gateway.CreateGatewayRequest, workspacePath string, port int) []string {
+	if p.desktopWeb {
+		return desktopWebEnvironment(base, cfg, req, workspacePath, port)
+	}
 	env := append([]string(nil), base...)
 	env = gateway.ApplyRequestEnvironment(env, req)
 	env = gateway.ApplyLiteTeamConfigEnvironment(env, req, workspacePath)
@@ -65,9 +75,9 @@ func (p Profile) GatewayEnv(base []string, cfg gateway.Config, req gateway.Creat
 		"CLAWMANAGER_TEAM_READY_FILE",
 		path.Join(teamWorkerHome, ".hermes", "runtime", "redis-team.ready.json"),
 	)
-	env = applyDashboardBasicAuthEnv(env, cfg, req)
 	env = unsetEnv(
 		env,
+		desktopWebFlag,
 		"RUNTIME_AGENT_CONTROL_TOKEN",
 		"RUNTIME_AGENT_REPORT_TOKEN",
 		"RUNTIME_AGENT_DATA_DIR",
@@ -82,52 +92,22 @@ func (p Profile) GatewayEnv(base []string, cfg gateway.Config, req gateway.Creat
 	return env
 }
 
-// applyDashboardBasicAuthEnv ensures Hermes can bind HOST=0.0.0.0 without the
-// deprecated --insecure flag. Password priority:
-//  1. existing HERMES_DASHBOARD_BASIC_AUTH_PASSWORD / PASSWORD_HASH from request env
-//  2. cfg.GatewayToken
-//  3. create-request access token aliases (CLAWMANAGER_DASHBOARD_BASIC_AUTH_PASSWORD,
-//     CLAWMANAGER_INSTANCE_ACCESS_TOKEN, CLAWMANAGER_INSTANCE_TOKEN, CLAWMANAGER_LLM_API_KEY,
-//     OPENAI_API_KEY, CLAWMANAGER_GATEWAY_TOKEN)
-// Username defaults to "clawmanager" unless already set.
-func applyDashboardBasicAuthEnv(env []string, cfg gateway.Config, req gateway.CreateGatewayRequest) []string {
-	username, hasUsername := requestEnvValue(req, "HERMES_DASHBOARD_BASIC_AUTH_USERNAME")
-	password, hasPassword := requestEnvValue(req, "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD")
-	_, hasPasswordHash := requestEnvValue(req, "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH")
-	if hasPassword || hasPasswordHash {
-		if !hasUsername || strings.TrimSpace(username) == "" {
-			env = setEnv(env, "HERMES_DASHBOARD_BASIC_AUTH_USERNAME", "clawmanager")
-		}
-		return env
-	}
-
-	password = strings.TrimSpace(cfg.GatewayToken)
-	if password == "" {
-		if value, ok := requestEnvValue(
-			req,
-			"CLAWMANAGER_DASHBOARD_BASIC_AUTH_PASSWORD",
-			"CLAWMANAGER_INSTANCE_ACCESS_TOKEN",
-			"CLAWMANAGER_INSTANCE_TOKEN",
-			"CLAWMANAGER_LLM_API_KEY",
-			"OPENAI_API_KEY",
-			"CLAWMANAGER_GATEWAY_TOKEN",
-		); ok {
-			password = strings.TrimSpace(value)
-		}
-	}
-	if password == "" {
-		return env
-	}
-
-	if !hasUsername || strings.TrimSpace(username) == "" {
-		username = "clawmanager"
-	}
-	env = setEnv(env, "HERMES_DASHBOARD_BASIC_AUTH_USERNAME", username)
-	env = setEnv(env, "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD", password)
-	return env
-}
-
 func (p Profile) PrepareWorkspace(cfg gateway.Config, req gateway.CreateGatewayRequest, workspacePath string) error {
+	if p.desktopWeb {
+		if err := validateDesktopWebRequest(cfg, req); err != nil {
+			return err
+		}
+		if desktopWebTeamRequest(req) {
+			prepared, err := gateway.PrepareWorkspace(cfg.WorkspaceRoot, cfg.RuntimeType, req)
+			if err != nil {
+				return err
+			}
+			if prepared != workspacePath {
+				return fmt.Errorf("%w: prepared %s want %s", gateway.ErrWorkspacePath, prepared, workspacePath)
+			}
+		}
+		return prepareDesktopWebWorkspace(cfg, req, workspacePath)
+	}
 	prepared, err := gateway.PrepareWorkspace(cfg.WorkspaceRoot, cfg.RuntimeType, req)
 	if err != nil {
 		return err
@@ -147,19 +127,7 @@ func (p Profile) HealthChecker(cfg gateway.Config) gateway.GatewayHealthChecker 
 }
 
 func requestEnvValue(req gateway.CreateGatewayRequest, keys ...string) (string, bool) {
-	for _, key := range keys {
-		if req.Environment != nil {
-			if value, ok := req.Environment[key]; ok {
-				return value, true
-			}
-		}
-		if req.Env != nil {
-			if value, ok := req.Env[key]; ok {
-				return value, true
-			}
-		}
-	}
-	return "", false
+	return gateway.RequestEnvValue(req, keys...)
 }
 
 func setEnv(env []string, key, value string) []string {

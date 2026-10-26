@@ -24,6 +24,7 @@ type Config struct {
 	RuntimeType      string
 	HTTPAddr         string
 	SkillDirs        []string
+	SkillInstallDir  string
 	HeartbeatEvery   time.Duration
 	CommandPollEvery time.Duration
 	StateReportEvery time.Duration
@@ -54,6 +55,9 @@ func LoadConfig(version string) (Config, error) {
 		CommandPollEvery: getenvDuration("HERMES_AGENT_COMMAND_POLL_INTERVAL_SECONDS", 5*time.Second),
 		StateReportEvery: getenvDuration("HERMES_AGENT_STATE_INTERVAL_SECONDS", 5*time.Second),
 		SkillScanEvery:   getenvDuration("HERMES_AGENT_SKILL_SCAN_INTERVAL_SECONDS", 5*time.Minute),
+	}
+	if len(cfg.SkillDirs) > 0 {
+		cfg.SkillInstallDir = cfg.SkillDirs[0]
 	}
 
 	if !cfg.Enabled {

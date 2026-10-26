@@ -14,6 +14,8 @@ import (
 	"strings"
 
 	"github.com/iamlovingit/clawmanager-agent/internal/gateway"
+	"github.com/iamlovingit/clawmanager-agent/internal/llmconfig"
+	"github.com/iamlovingit/clawmanager-agent/internal/openclawcompat"
 	"github.com/iamlovingit/clawmanager-agent/internal/scheduledtasks"
 )
 
@@ -40,15 +42,22 @@ var openClawDefaultDeniedNodeCommands = []string{
 	"sms.send",
 }
 
+var openClawTrustedProxyDeviceScopes = []string{
+	"operator.read",
+	"operator.write",
+	"operator.approvals",
+	"operator.questions",
+}
+
 var openClawDefaultDisabledPlugins = []string{
 	"bonjour",
-	"acpx",
-	"phone-control",
 	"talk-voice",
 	"device-pair",
 	"dingtalk-connector",
 	"wecom-openclaw-plugin",
 	"redis-team",
+	"a2a",
+	"workboard",
 }
 
 var openClawEnvManagedChannelPlugins = map[string][]string{
@@ -96,14 +105,15 @@ func WriteGatewayConfig(cfg gateway.Config, req gateway.CreateGatewayRequest, wo
 	} else if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("read openclaw config: %w", err)
 	}
+	openClawVersion := resolveOpenClawVersion(cfg, req)
 	configureManagedOpenClawBrowser(config, req, port)
-	mergeOpenClawLiteDefaults(config)
+	mergeOpenClawLiteDefaults(config, openClawVersion)
 	reconcileOpenClawBrowserPlugin(config)
 	if err := mergeOpenClawChannelsFromRequest(config, req); err != nil {
 		return err
 	}
 
-	mergePlatformDefaults(config, port)
+	mergePlatformDefaults(config, port, openClawVersion)
 	agentDefaults := ensureObject(ensureObject(config, "agents"), "defaults")
 	agentDefaults["workspace"] = filepath.ToSlash(instancePaths.OpenClawWorkspace)
 	if teamEnabledFromRequest(req) {
@@ -112,6 +122,16 @@ func WriteGatewayConfig(cfg gateway.Config, req gateway.CreateGatewayRequest, wo
 		}
 		if err := seedOpenClawRedisTeamPlugin(req, workspacePath); err != nil {
 			return err
+		}
+		if gateway.IsOpenClawAtLeast(openClawVersion, "2026.10.2") {
+			legacyTarget := filepath.Join(instancePaths.Persistent, "extensions", openClawRedisTeamPluginID)
+			// The synchronizer deliberately preserves an unrecognized extension.
+			// Do not silently override that user-owned implementation either.
+			if validateOpenClawRedisTeamPlugin(legacyTarget, false) == nil {
+				if err := selectBundledRedisTeamPlugin(config); err != nil {
+					return err
+				}
+			}
 		}
 	}
 
@@ -136,11 +156,30 @@ func WriteGatewayConfig(cfg gateway.Config, req gateway.CreateGatewayRequest, wo
 		trustedProxy["userHeader"] = openClawTrustedProxyUserHeader
 		trustedProxy["requiredHeaders"] = []string{openClawTrustedProxyRequiredHeader}
 		trustedProxy["allowUsers"] = []string{basePath}
+		if gateway.IsOpenClawAtLeast(openClawVersion, gateway.OpenClaw81Version) {
+			// OpenClaw 8.1 retired dangerouslyDisableDeviceAuth. Enroll only
+			// browser devices that have already passed ClawManager's
+			// instance-scoped trusted-proxy authentication, and keep the
+			// persistent device grant below operator.admin. Full Control UI
+			// access is granted dynamically to this exact proxy identity, as
+			// recommended by the 8.1 trusted-proxy contract.
+			trustedProxy["deviceAutoApprove"] = map[string]any{
+				"enabled": true,
+				"scopes":  append([]string(nil), openClawTrustedProxyDeviceScopes...),
+			}
+			identityScopes := ensureObject(auth, "identityScopes")
+			identityScopes[basePath] = []string{"operator.admin"}
+		} else {
+			delete(trustedProxy, "deviceAutoApprove")
+			delete(auth, "identityScopes")
+		}
 	}
 
 	controlUI := ensureObject(gatewayConfig, "controlUi")
 	controlUI["basePath"] = basePath
-	if cfg.GatewayAuthMode == "trusted-proxy" {
+	if gateway.IsOpenClawAtLeast(openClawVersion, gateway.OpenClaw81Version) {
+		delete(controlUI, "dangerouslyDisableDeviceAuth")
+	} else if cfg.GatewayAuthMode == "trusted-proxy" {
 		controlUI["dangerouslyDisableDeviceAuth"] = true
 	}
 	origins := cfg.AllowedOrigins
@@ -154,6 +193,9 @@ func WriteGatewayConfig(cfg gateway.Config, req gateway.CreateGatewayRequest, wo
 		gatewayConfig["trustedProxies"] = appendUniqueStringArray(gatewayConfig["trustedProxies"], cfg.TrustedProxies...)
 	}
 	mergeOpenClawLLMConfig(config, cfg)
+	if gateway.IsOpenClawAtLeast(openClawVersion, gateway.OpenClaw81Version) {
+		openclawcompat.Normalize81(config)
+	}
 
 	data, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
@@ -177,6 +219,12 @@ func WriteGatewayConfig(cfg gateway.Config, req gateway.CreateGatewayRequest, wo
 		}
 	}
 	openclawHome := filepath.Join(workspacePath, "home", ".openclaw")
+	if gateway.IsOpenClawAtLeast(openClawVersion, gateway.OpenClaw81Version) {
+		// OpenClaw 8.1 owns its SQLite-backed Automation store through the
+		// Gateway. The manager reconciles declarations after readiness; writing
+		// cron/jobs.json here would race the upstream migration and duplicate jobs.
+		return nil
+	}
 	result := scheduledtasks.ApplyOpenClawFromEnv(openclawHome, func(key string) string {
 		if req.Environment != nil {
 			if value, ok := req.Environment[key]; ok {
@@ -203,6 +251,19 @@ func WriteGatewayConfig(cfg gateway.Config, req gateway.CreateGatewayRequest, wo
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("stat openclaw cron dir: %w", err)
 	}
+	return nil
+}
+
+// 10.2's native channel startup uses source/ownership facts in addition to an
+// allowlist. Pin this platform-owned plugin to the immutable image bundle using
+// the upstream load-path selector, never by trusting arbitrary global plugins.
+func selectBundledRedisTeamPlugin(config map[string]any) error {
+	root := filepath.Join(openClawGlobalPackageDir, "dist", "extensions", openClawRedisTeamPluginID)
+	if err := validateOpenClawRedisTeamPlugin(root, true); err != nil {
+		return fmt.Errorf("managed Team bundle is missing or invalid: %w", err)
+	}
+	load := ensureObject(ensureObject(config, "plugins"), "load")
+	load["paths"] = appendUniqueStringArray(load["paths"], filepath.ToSlash(root))
 	return nil
 }
 
@@ -325,7 +386,7 @@ func setDefaultObjectValue(object map[string]any, key string, value any) {
 // Values are only filled when absent so recreating an existing Lite instance
 // does not discard explicit user choices. Environment-managed model, channel,
 // Team, gateway port, and authentication settings are applied afterwards.
-func mergeOpenClawLiteDefaults(config map[string]any) {
+func mergeOpenClawLiteDefaults(config map[string]any, openClawVersion string) {
 	models := ensureObject(config, "models")
 	setDefaultObjectValue(models, "mode", "merge")
 
@@ -350,6 +411,10 @@ func mergeOpenClawLiteDefaults(config map[string]any) {
 
 	tools := ensureObject(config, "tools")
 	setDefaultObjectValue(tools, "profile", "full")
+	if gateway.IsOpenClawAtLeast(openClawVersion, gateway.OpenClaw81Version) {
+		swarm := ensureObject(tools, "swarm")
+		swarm["enabled"] = false
+	}
 
 	commands := ensureObject(config, "commands")
 	setDefaultObjectValue(commands, "native", "auto")
@@ -367,7 +432,16 @@ func mergeOpenClawLiteDefaults(config map[string]any) {
 	setDefaultObjectValue(tailscale, "mode", "off")
 	setDefaultObjectValue(tailscale, "resetOnExit", false)
 	nodes := ensureObject(gatewayConfig, "nodes")
-	nodes["denyCommands"] = appendUniqueStringArray(nodes["denyCommands"], openClawDefaultDeniedNodeCommands...)
+	if gateway.IsOpenClawAtLeast(openClawVersion, gateway.OpenClaw81Version) {
+		commands := ensureObject(nodes, "commands")
+		legacyDenied := appendUniqueStringArray(nodes["denyCommands"])
+		commands["deny"] = appendUniqueStringArray(commands["deny"], append(legacyDenied, openClawDefaultDeniedNodeCommands...)...)
+		delete(nodes, "denyCommands")
+		delete(config, "cloudWorkers")
+		delete(gatewayConfig, "roles")
+	} else {
+		nodes["denyCommands"] = appendUniqueStringArray(nodes["denyCommands"], openClawDefaultDeniedNodeCommands...)
+	}
 
 	entries := ensureObject(ensureObject(config, "plugins"), "entries")
 	for _, pluginID := range openClawDefaultDisabledPlugins {
@@ -379,6 +453,10 @@ func mergeOpenClawLiteDefaults(config map[string]any) {
 	setDefaultObjectValue(dreaming, "enabled", true)
 	setDefaultObjectValue(dreaming, "frequency", "0 3 * * *")
 	setDefaultObjectValue(dreaming, "timezone", "Asia/Shanghai")
+
+	if gateway.IsOpenClawAtLeast(openClawVersion, gateway.OpenClaw81Version) {
+		openclawcompat.Normalize81(config)
+	}
 }
 
 func mergeOpenClawChannelsFromRequest(config map[string]any, req gateway.CreateGatewayRequest) error {
@@ -442,17 +520,22 @@ func reconcileOpenClawChannelPlugins(config map[string]any, channelsPayload map[
 	}
 }
 
-func mergePlatformDefaults(config map[string]any, port int) {
+func mergePlatformDefaults(config map[string]any, port int, openClawVersion string) {
 	gatewayConfig := ensureObject(config, "gateway")
 	gatewayConfig["port"] = port
 
 	cron := ensureObject(config, "cron")
 	cron["enabled"] = true
-	cron["maxConcurrentRuns"] = 2
-	runLog := ensureObject(cron, "runLog")
-	runLog["keepLines"] = 2000
-	runLog["maxBytes"] = "2mb"
 	cron["sessionRetention"] = "24h"
+	if gateway.IsOpenClawAtLeast(openClawVersion, gateway.OpenClaw81Version) {
+		delete(cron, "maxConcurrentRuns")
+		delete(cron, "runLog")
+	} else {
+		cron["maxConcurrentRuns"] = 2
+		runLog := ensureObject(cron, "runLog")
+		runLog["keepLines"] = 2000
+		runLog["maxBytes"] = "2mb"
+	}
 
 	update := ensureObject(config, "update")
 	update["checkOnStart"] = false
@@ -832,57 +915,25 @@ func chownTree(root string, uid, gid int) error {
 }
 
 func configWithRequestLLMEnv(cfg gateway.Config, req gateway.CreateGatewayRequest) (gateway.Config, error) {
-	resolved := cfg
-	if value, ok := requestEnvValue(req, "CLAWMANAGER_LLM_BASE_URL", "OPENAI_BASE_URL", "OPENAI_API_BASE"); ok && strings.TrimSpace(value) != "" {
-		resolved.LLMBaseURL = strings.TrimSpace(value)
-	}
-	if value, ok := requestEnvValue(req, "CLAWMANAGER_LLM_API_KEY", "OPENAI_API_KEY"); ok {
-		resolved.LLMAPIKey = value
-		resolved.LLMAPIKeySet = true
-	}
-	if raw, ok := requestEnvValue(req, "CLAWMANAGER_LLM_MODEL", "OPENAI_MODEL"); ok && strings.TrimSpace(raw) != "" {
-		modelIDs, err := parseLLMModelIDs(raw)
-		if err != nil {
-			return gateway.Config{}, err
-		}
-		resolved.LLMModelIDs = modelIDs
-	}
-	if raw, ok := requestEnvValue(req, "CLAWMANAGER_LLM_REASONING"); ok && strings.TrimSpace(raw) != "" {
-		reasoning, err := parseLLMReasoning(raw)
-		if err != nil {
-			return gateway.Config{}, err
-		}
-		resolved.LLMReasoning = reasoning
-	}
-	if raw, ok := requestEnvValue(req, "CLAWMANAGER_LLM_REASONING_CONTROL"); ok && strings.TrimSpace(raw) != "" {
-		controls, err := parseLLMReasoningControl(raw)
-		if err != nil {
-			return gateway.Config{}, err
-		}
-		resolved.LLMReasoningControl = controls
-	}
-	vision, err := gateway.ResolveVisionCapabilities(cfg, req)
+	settings, err := llmconfig.ResolveGateway(cfg, req, llmconfig.ResolveOptions{})
 	if err != nil {
 		return gateway.Config{}, err
 	}
-	resolved.LLMVision = vision
-	return resolved, nil
+	return settings.ApplyTo(cfg), nil
 }
 
 func requestEnvValue(req gateway.CreateGatewayRequest, keys ...string) (string, bool) {
-	for _, key := range keys {
-		if req.Environment != nil {
-			if value, ok := req.Environment[key]; ok {
-				return value, true
-			}
-		}
-		if req.Env != nil {
-			if value, ok := req.Env[key]; ok {
-				return value, true
-			}
-		}
+	return gateway.RequestEnvValue(req, keys...)
+}
+
+func resolveOpenClawVersion(cfg gateway.Config, req gateway.CreateGatewayRequest) string {
+	if version := strings.TrimSpace(cfg.OpenClawVersion); version != "" {
+		return version
 	}
-	return "", false
+	if version, ok := requestEnvValue(req, "CLAWMANAGER_OPENCLAW_VERSION"); ok {
+		return strings.TrimSpace(version)
+	}
+	return strings.TrimSpace(os.Getenv("CLAWMANAGER_OPENCLAW_VERSION"))
 }
 
 func mergeOpenClawLLMConfig(config map[string]any, cfg gateway.Config) {
@@ -893,7 +944,65 @@ func mergeOpenClawLLMConfig(config map[string]any, cfg gateway.Config) {
 
 	models := ensureObject(config, "models")
 	providers := ensureObject(models, "providers")
-	provider := ensureObject(providers, openClawAutoProviderName)
+	modelRefs := llmconfig.FromGatewayConfig(cfg).ModelRefs(openClawAutoProviderName)
+	providerGroups := llmconfig.GroupModelRefs(modelRefs)
+
+	if len(modelRefs) > 0 {
+		providerReasoning := make(map[string]map[string]bool)
+		providerReasoningControl := make(map[string]map[string]string)
+		for _, ref := range modelRefs {
+			if _, exists := providerReasoning[ref.ProviderID]; !exists {
+				providerReasoning[ref.ProviderID] = make(map[string]bool)
+				providerReasoningControl[ref.ProviderID] = make(map[string]string)
+			}
+			if value, exists := openClawReasoningForRef(cfg.LLMReasoning, ref); exists {
+				providerReasoning[ref.ProviderID][ref.ModelID] = value
+			}
+			if value, exists := openClawReasoningControlForRef(cfg.LLMReasoningControl, ref); exists {
+				providerReasoningControl[ref.ProviderID][ref.ModelID] = value
+			}
+		}
+
+		for _, group := range providerGroups {
+			provider := mergeOpenClawProviderConnection(providers, group.ProviderID, cfg)
+			provider["models"] = buildOpenClawProviderModels(
+				provider["models"],
+				group.ModelIDs,
+				providerReasoning[group.ProviderID],
+				providerReasoningControl[group.ProviderID],
+			)
+			for _, entry := range provider["models"].([]any) {
+				model := entry.(map[string]any)
+				id := configStringValue(model["id"])
+				ref := llmconfig.ModelRef{ModelID: id, Qualified: group.ProviderID + "/" + id}
+				if vision, managed := openClawSettingForRef(cfg.LLMVision, ref); managed {
+					model["input"] = gateway.VisionInputModalities(model["input"], vision)
+				}
+			}
+		}
+
+		agents := ensureObject(config, "agents")
+		defaults := ensureObject(agents, "defaults")
+		model := ensureObject(defaults, "model")
+		primaryModel := modelRefs[0].Qualified
+		model["primary"] = primaryModel
+		defaults["models"] = buildOpenClawAgentModelsFromRefs(defaults["models"], modelRefs)
+		// OpenClaw 2026.7.1 auto-discovers a built-in OpenAI image fallback when
+		// imageModel is unset. ClawManager also exports OPENAI_* compatibility
+		// aliases, so that fallback can look configured even though the user did
+		// not enable it. Keep image calls on the managed provider while preserving
+		// an explicit custom image model.
+		if rawImageModel, exists := defaults["imageModel"]; !exists || rawImageModel == nil {
+			defaults["imageModel"] = map[string]any{"primary": primaryModel}
+		}
+	} else {
+		mergeOpenClawProviderConnection(providers, openClawAutoProviderName, cfg)
+	}
+	normalizeOpenClawProviderAuthContracts(config)
+}
+
+func mergeOpenClawProviderConnection(providers map[string]any, providerID string, cfg gateway.Config) map[string]any {
+	provider := ensureObject(providers, providerID)
 	if cfg.LLMBaseURL != "" {
 		provider["baseUrl"] = cfg.LLMBaseURL
 	}
@@ -906,31 +1015,23 @@ func mergeOpenClawLLMConfig(config map[string]any, cfg gateway.Config) {
 	if strings.TrimSpace(configStringValue(provider["auth"])) == "" && strings.TrimSpace(cfg.LLMAPIKey) != "" {
 		provider["auth"] = "api-key"
 	}
-	if len(cfg.LLMModelIDs) > 0 {
-		provider["models"] = buildOpenClawProviderModels(provider["models"], cfg.LLMModelIDs, cfg.LLMReasoning, cfg.LLMReasoningControl)
-		for _, entry := range provider["models"].([]any) {
-			model := entry.(map[string]any)
-			if vision, managed := cfg.LLMVision[configStringValue(model["id"])]; managed {
-				model["input"] = gateway.VisionInputModalities(model["input"], vision)
-			}
-		}
+	return provider
+}
 
-		agents := ensureObject(config, "agents")
-		defaults := ensureObject(agents, "defaults")
-		model := ensureObject(defaults, "model")
-		primaryModel := qualifiedOpenClawModelID(openClawAutoProviderName, cfg.LLMModelIDs[0])
-		model["primary"] = primaryModel
-		defaults["models"] = buildOpenClawAgentModels(defaults["models"], openClawAutoProviderName, cfg.LLMModelIDs)
-		// OpenClaw 2026.7.1 auto-discovers a built-in OpenAI image fallback when
-		// imageModel is unset. ClawManager also exports OPENAI_* compatibility
-		// aliases, so that fallback can look configured even though the user did
-		// not enable it. Keep image calls on the managed provider while preserving
-		// an explicit custom image model.
-		if rawImageModel, exists := defaults["imageModel"]; !exists || rawImageModel == nil {
-			defaults["imageModel"] = map[string]any{"primary": primaryModel}
-		}
+func openClawReasoningForRef(settings map[string]bool, ref llmconfig.ModelRef) (bool, bool) {
+	return openClawSettingForRef(settings, ref)
+}
+
+func openClawReasoningControlForRef(settings map[string]string, ref llmconfig.ModelRef) (string, bool) {
+	return openClawSettingForRef(settings, ref)
+}
+
+func openClawSettingForRef[T any](settings map[string]T, ref llmconfig.ModelRef) (T, bool) {
+	if value, exists := settings[ref.Qualified]; exists {
+		return value, true
 	}
-	normalizeOpenClawProviderAuthContracts(config)
+	value, exists := settings[ref.ModelID]
+	return value, exists
 }
 
 func normalizeOpenClawProviderAuthContracts(config map[string]any) {
@@ -1020,18 +1121,17 @@ func indexOpenClawModelsByID(existing any) map[string]map[string]any {
 	return index
 }
 
-func buildOpenClawAgentModels(existing any, providerName string, modelIDs []string) map[string]any {
+func buildOpenClawAgentModelsFromRefs(existing any, refs []llmconfig.ModelRef) map[string]any {
 	current, _ := existing.(map[string]any)
-	models := make(map[string]any, len(modelIDs))
-	for _, id := range modelIDs {
-		key := qualifiedOpenClawModelID(providerName, id)
+	models := make(map[string]any, len(refs))
+	for _, ref := range refs {
 		if current != nil {
-			if value, ok := current[key]; ok {
-				models[key] = value
+			if value, ok := current[ref.Qualified]; ok {
+				models[ref.Qualified] = value
 				continue
 			}
 		}
-		models[key] = map[string]any{}
+		models[ref.Qualified] = map[string]any{}
 	}
 	return models
 }
@@ -1053,10 +1153,6 @@ func defaultOpenClawProviderModel(id string, reasoning bool) map[string]any {
 		"contextWindow": 1000000,
 		"maxTokens":     65536,
 	}
-}
-
-func qualifiedOpenClawModelID(providerName, id string) string {
-	return providerName + "/" + id
 }
 
 func displayOpenClawModelName(id string) string {

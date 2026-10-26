@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -13,7 +12,9 @@ import (
 	"time"
 
 	"github.com/iamlovingit/clawmanager-agent/internal/gateway"
+	"github.com/iamlovingit/clawmanager-agent/internal/llmconfig"
 	runtimeprofiles "github.com/iamlovingit/clawmanager-agent/internal/runtime"
+	"github.com/iamlovingit/clawmanager-agent/internal/runtime/deepseek"
 	"github.com/iamlovingit/clawmanager-agent/internal/runtime/generic"
 	"github.com/iamlovingit/clawmanager-agent/internal/runtime/hermes"
 	"github.com/iamlovingit/clawmanager-agent/internal/runtime/openclaw"
@@ -77,6 +78,8 @@ func LoadConfigFromEnv() (Config, error) {
 
 	cfg := Config{
 		RuntimeType:           runtimeType,
+		OpenClawVersion:       strings.TrimSpace(os.Getenv("CLAWMANAGER_OPENCLAW_VERSION")),
+		UpgradeID:             strings.TrimSpace(os.Getenv("CLAWMANAGER_RUNTIME_UPGRADE_ID")),
 		Runtime:               profile,
 		WorkspaceRoot:         cleanPath(envOrDefault("RUNTIME_WORKSPACE_ROOT", defaults.WorkspaceRoot)),
 		ControlToken:          strings.TrimSpace(os.Getenv("RUNTIME_AGENT_CONTROL_TOKEN")),
@@ -111,32 +114,36 @@ func LoadConfigFromEnv() (Config, error) {
 	cfg.AllowedOrigins = uniqueOrigins(backendOrigin)
 	cfg.PublicOrigin = backendOrigin
 	cfg.TrustedProxies = trustedProxiesFromEnvOrPodIP(cfg.PodIP)
-	cfg.LLMBaseURL = strings.TrimSpace(os.Getenv("CLAWMANAGER_LLM_BASE_URL"))
-	if apiKey, ok := os.LookupEnv("CLAWMANAGER_LLM_API_KEY"); ok {
-		cfg.LLMAPIKey = apiKey
-		cfg.LLMAPIKeySet = true
-	}
-	if raw := strings.TrimSpace(os.Getenv("CLAWMANAGER_LLM_MODEL")); raw != "" {
-		modelIDs, err := parseLLMModelIDs(raw)
-		if err != nil {
-			return Config{}, err
+	if runtimeType == "openclaw" {
+		if marker, err := os.Stat(gateway.ManagedProxyPolicyMarker); err == nil && marker.Mode().IsRegular() {
+			cfg.ProxyPolicyFile = gateway.ManagedProxyPolicyFile
+			cfg.TrustedProxies = nil
 		}
-		cfg.LLMModelIDs = modelIDs
 	}
-	if raw := strings.TrimSpace(os.Getenv("CLAWMANAGER_LLM_REASONING")); raw != "" {
-		var reasoning map[string]bool
-		if err := json.Unmarshal([]byte(raw), &reasoning); err != nil {
-			return Config{}, fmt.Errorf("parse CLAWMANAGER_LLM_REASONING: %w", err)
+	if runtimeType == "hermes" && os.Getenv("CLAWMANAGER_HERMES_DESKTOP_WEB_ENABLED") == "true" {
+		// The Lite boundary accepts only explicitly configured trust. Do not
+		// infer a cluster CIDR from the Pod IP or use a public backend URL.
+		cfg.PublicOrigin = strings.TrimSpace(os.Getenv("CLAWMANAGER_CONTROL_UI_ORIGIN"))
+		cfg.AllowedOrigins = nil
+		cfg.TrustedProxies = nil
+		if marker, err := os.Stat(gateway.HermesManagedProxyPolicyMarker); err == nil && marker.Mode().IsRegular() {
+			cfg.ProxyPolicyFile = gateway.ManagedProxyPolicyFile
 		}
-		cfg.LLMReasoning = reasoning
-	}
-	if raw := strings.TrimSpace(os.Getenv("CLAWMANAGER_LLM_REASONING_CONTROL")); raw != "" {
-		var controls map[string]string
-		if err := json.Unmarshal([]byte(raw), &controls); err != nil {
-			return Config{}, fmt.Errorf("parse CLAWMANAGER_LLM_REASONING_CONTROL: %w", err)
+		for _, cidr := range strings.Split(os.Getenv("CLAWMANAGER_TRUSTED_PROXY_CIDRS"), ",") {
+			if cidr = strings.TrimSpace(cidr); cidr != "" {
+				cfg.TrustedProxies = append(cfg.TrustedProxies, cidr)
+			}
 		}
-		cfg.LLMReasoningControl = controls
+		backend, parseErr := url.Parse(cfg.BackendURL)
+		if parseErr != nil || backend.User != nil || backend.RawQuery != "" || backend.Fragment != "" || !(strings.HasSuffix(backend.Hostname(), ".svc.cluster.local") || strings.HasSuffix(backend.Hostname(), ".svc")) {
+			return Config{}, errors.New("Hermes Lite requires CLAWMANAGER_BACKEND_URL to use Kubernetes Service DNS")
+		}
 	}
+	llmSettings, err := llmconfig.LoadFromEnv(llmconfig.ResolveOptions{})
+	if err != nil {
+		return Config{}, err
+	}
+	cfg = llmSettings.ApplyTo(cfg)
 
 	if raw := os.Getenv("CLAWMANAGER_LLM_VISION"); strings.TrimSpace(raw) != "" {
 		vision, err := gateway.ParseVisionCapabilities(raw)
@@ -181,6 +188,9 @@ func LoadConfigFromEnv() (Config, error) {
 	if cfg.HeartbeatInterval, err = durationEnv("RUNTIME_AGENT_HEARTBEAT_INTERVAL", cfg.HeartbeatInterval); err != nil {
 		return Config{}, err
 	}
+	if cfg.HeartbeatInterval <= 0 {
+		return Config{}, errors.New("RUNTIME_AGENT_HEARTBEAT_INTERVAL must be positive")
+	}
 	if cfg.MetricsInterval, err = durationEnv("RUNTIME_AGENT_METRICS_INTERVAL", cfg.MetricsInterval); err != nil {
 		return Config{}, err
 	}
@@ -201,6 +211,9 @@ func LoadConfigFromEnv() (Config, error) {
 	}
 
 	cfg.AgentEndpoint = "http://" + cfg.PodIP + ":" + strconv.Itoa(cfg.PublicPort)
+	if hermesProfile, ok := cfg.Runtime.(hermes.Profile); ok {
+		cfg.Runtime = hermesProfile.WithVerifiedCapabilities(cfg)
+	}
 	return cfg, nil
 }
 
@@ -208,6 +221,7 @@ func defaultRuntimeRegistry() *runtimeprofiles.Registry {
 	registry := runtimeprofiles.NewRegistry()
 	_ = registry.Register(openclaw.NewProfile("openclaw"))
 	_ = registry.Register(openclaw.NewProfile("openclaw-shell"))
+	_ = registry.Register(deepseek.NewProfile("deepseek-harness"))
 	_ = registry.Register(hermes.NewProfile("hermes"))
 	_ = registry.Register(opencode.NewProfile("opencode"))
 	_ = registry.Register(windowsvm.NewProfile("windows-vm"))
@@ -358,58 +372,6 @@ func uniqueOrigins(values ...string) []string {
 	return out
 }
 
-func parseLLMModelIDs(raw string) ([]string, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return nil, nil
-	}
-	if strings.HasPrefix(raw, "[") {
-		var parsed []any
-		if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
-			modelIDs := parseDelimitedLLMModelIDs(strings.TrimSuffix(strings.TrimPrefix(raw, "["), "]"))
-			if len(modelIDs) == 0 {
-				return nil, fmt.Errorf("parse CLAWMANAGER_LLM_MODEL array: %w", err)
-			}
-			return modelIDs, nil
-		}
-		modelIDs := uniqueLLMModelIDs(parsed)
-		if len(modelIDs) == 0 {
-			return nil, fmt.Errorf("parse CLAWMANAGER_LLM_MODEL array: no model ids found")
-		}
-		return modelIDs, nil
-	}
-	return []string{raw}, nil
-}
-
-func parseDelimitedLLMModelIDs(raw string) []string {
-	parts := strings.Split(raw, ",")
-	values := make([]any, 0, len(parts))
-	for _, part := range parts {
-		id := strings.Trim(strings.TrimSpace(part), `"'`)
-		if id != "" {
-			values = append(values, id)
-		}
-	}
-	return uniqueLLMModelIDs(values)
-}
-
-func uniqueLLMModelIDs(values []any) []string {
-	seen := make(map[string]struct{}, len(values))
-	modelIDs := make([]string, 0, len(values))
-	for _, value := range values {
-		id := strings.TrimSpace(fmt.Sprint(value))
-		if id == "" {
-			continue
-		}
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		seen[id] = struct{}{}
-		modelIDs = append(modelIDs, id)
-	}
-	return modelIDs
-}
-
 func cleanPath(path string) string {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -446,6 +408,11 @@ func firstNonLoopbackIP() string {
 }
 
 func deploymentName(podName, runtimeType string) string {
+	// The control plane owns this identity. Pod names can be truncated by
+	// Kubernetes and cannot reliably reconstruct long upgrade deployment names.
+	if value := strings.TrimSpace(envOrDefault("CLAWMANAGER_RUNTIME_DEPLOYMENT_NAME", "")); value != "" {
+		return value
+	}
 	if value := strings.TrimSpace(envOrDefault("CLAWMANAGER_DEPLOYMENT_NAME", "")); value != "" {
 		return value
 	}

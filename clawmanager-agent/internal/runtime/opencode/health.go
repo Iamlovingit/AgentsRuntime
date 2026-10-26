@@ -63,6 +63,10 @@ func (h *healthChecker) WaitReady(ctx context.Context, spec gateway.GatewayStart
 	}
 }
 
+func (h *healthChecker) CheckHealth(ctx context.Context, spec gateway.GatewayStartSpec) error {
+	return h.probeOnce(ctx, spec)
+}
+
 func (h *healthChecker) probeOnce(ctx context.Context, spec gateway.GatewayStartSpec) error {
 	address := fmt.Sprintf("127.0.0.1:%d", spec.Port)
 	conn, err := (&net.Dialer{Timeout: time.Second}).DialContext(ctx, "tcp", address)

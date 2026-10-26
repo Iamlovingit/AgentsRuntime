@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Patch pinned Hermes Agent to stop after an accepted Team completion tool.
+"""Patch pinned Hermes Agent to yield after a durable Team completion tool.
 
 The patch is deliberately narrow and build-failing on upstream drift. It does
 not change generic tool-loop semantics: only the redis_team completion tool's
-authenticated `decision=accepted` result ends the current model turn.
+authenticated accepted/submitted/deferred receipts end the current model turn.
+Pending receipts do not complete the assignment: the existing late-ack watcher
+and ClawManager remain authoritative. The tool result is persisted first.
 """
 
 from __future__ import annotations
@@ -13,17 +15,18 @@ from pathlib import Path
 
 
 MARKER = "clawmanager-team-completion-stop-v1"
-ANCHOR = """                agent._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
-
-                if agent._tool_guardrail_halt_decision is not None:
+ANCHOR = """                if agent._tool_guardrail_halt_decision is not None:
 """
-REPLACEMENT = """                agent._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
-
+REPLACEMENT = """                # The pinned Hermes release persists every tool result before
+                # control returns here. Keep this ClawManager-specific stop
+                # decision after that persistence boundary and before generic
+                # tool guardrail handling.
                 # clawmanager-team-completion-stop-v1
                 # An accepted explicit Team completion is already durable in
                 # ClawManager. Do not spend another model iteration asking the
-                # model what to do after its terminal tool succeeded. Rejected
-                # and pending receipts deliberately retain the normal loop.
+                # model what to do after its explicit tool succeeded. Pending
+                # receipts yield to the existing acknowledgement watcher;
+                # rejected receipts retain the normal correction loop.
                 _team_completion_accepted = False
                 for _team_result_message in reversed(messages):
                     if not isinstance(_team_result_message, dict):
@@ -42,14 +45,15 @@ REPLACEMENT = """                agent._execute_tool_calls(assistant_message, me
                     _team_completion_accepted = bool(
                         isinstance(_team_result_payload, dict)
                         and _team_result_payload.get("ok") is True
-                        and str(_team_result_payload.get("decision") or "").strip().lower() == "accepted"
+                        and str(_team_result_payload.get("decision") or "").strip().lower() in {"accepted", "submitted", "deferred"}
                     )
                     break
                 if _team_completion_accepted:
-                    _turn_exit_reason = "team_completion_accepted"
+                    _team_decision = str(_team_result_payload.get("decision") or "").strip().lower()
+                    _turn_exit_reason = "team_completion_accepted" if _team_decision == "accepted" else "team_completion_pending"
                     final_response = (
                         agent._strip_think_blocks(assistant_message.content or "").strip()
-                        or "Completion accepted by ClawManager."
+                        or ("Completion accepted by ClawManager." if _team_decision == "accepted" else "Completion submitted; awaiting ClawManager decision.")
                     )
                     break
 
@@ -66,7 +70,7 @@ def main() -> int:
         return 0
     count = source.count(ANCHOR)
     if count != 1:
-        raise RuntimeError(f"expected exactly one Hermes tool-loop anchor, found {count}")
+        raise RuntimeError(f"expected exactly one Hermes post-tool guardrail anchor, found {count}")
     target.write_text(source.replace(ANCHOR, REPLACEMENT), encoding="utf-8")
     return 0
 

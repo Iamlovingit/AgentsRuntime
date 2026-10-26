@@ -165,7 +165,7 @@ func TestProcessWatcherCannotRemoveStopFenceOrReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	done <- nil
-	m.watchGatewayProcess(req.GatewayID, done)
+	m.watchGatewayProcess(req.GatewayID, 1234, done)
 	if m.UsedSlots() != 1 || m.gateways[req.GatewayID].process.PID != 1234 {
 		t.Fatal("watcher lost fenced process")
 	}
@@ -173,7 +173,7 @@ func TestProcessWatcherCannotRemoveStopFenceOrReplacement(t *testing.T) {
 	other <- nil
 	m.gateways[req.GatewayID].stopOperation = ""
 	m.gateways[req.GatewayID].state.State = "running"
-	m.watchGatewayProcess(req.GatewayID, other)
+	m.watchGatewayProcess(req.GatewayID, 1234, other)
 	if m.gateways[req.GatewayID].state.State != "running" {
 		t.Fatal("old watcher changed replacement")
 	}

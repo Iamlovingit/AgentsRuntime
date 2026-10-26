@@ -22,3 +22,23 @@ func TestManagedVisionChangesInputOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestQualifiedVisionSurvivesRequestResolution(t *testing.T) {
+	cfg, err := configWithRequestLLMEnv(gateway.Config{}, gateway.CreateGatewayRequest{Environment: map[string]string{
+		"CLAWMANAGER_LLM_PROVIDER_MODELS": `["openai/model","other/model"]`,
+		"CLAWMANAGER_LLM_VISION":          `{"model":true,"openai/model":false}`,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := map[string]any{}
+	mergeOpenClawLLMConfig(doc, cfg)
+	providers := doc["models"].(map[string]any)["providers"].(map[string]any)
+	for provider, want := range map[string]bool{"openai": false, "other": true} {
+		models := providers[provider].(map[string]any)["models"].([]any)
+		raw, _ := json.Marshal(models[0].(map[string]any)["input"])
+		if strings.Contains(string(raw), "image") != want {
+			t.Fatalf("%s: %s", provider, raw)
+		}
+	}
+}
