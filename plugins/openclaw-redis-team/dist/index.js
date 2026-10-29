@@ -6550,6 +6550,14 @@ async function startConsumer(cfg, onMessage, onProcessingFailure, log) {
           }
         }
         for (const msg of messages) {
+          if ((await teamMaintenanceState(redis, cfg)).enabled) {
+            // Maintenance can start while the previous message in this batch
+            // is executing. Keep the remainder pending, including after the
+            // pending-drain batch limit has switched readID to new messages.
+            readID = "0";
+            pendingDrainBatches = 3;
+            break;
+          }
           try {
             const envelope = normalizeEnvelope(msg);
             if (!envelope) continue;
