@@ -259,6 +259,9 @@ func mergeDesktopWebYAML(existing []byte, cfg gateway.Config, publicURL string, 
 		return nil, fmt.Errorf("workspace_unavailable: encode managed Hermes YAML")
 	}
 	mergeDesktopWebYAMLNode(document.Content[0], &overlay)
+	if err := applyManagedVisionYAML(document.Content[0], cfg); err != nil {
+		return nil, err
+	}
 	enableDesktopWebBasicAuth(document.Content[0])
 	var buffer bytes.Buffer
 	encoder := yaml.NewEncoder(&buffer)

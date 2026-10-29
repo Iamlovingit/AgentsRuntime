@@ -350,6 +350,7 @@ type llmOverrides struct {
 	APIKey    string
 	APIKeySet bool
 	ModelIDs  []string
+	Vision    map[string]bool
 }
 
 func readLLMOverridesFromEnv() (llmOverrides, bool, error) {
@@ -363,6 +364,19 @@ func readLLMOverridesFromEnv() (llmOverrides, bool, error) {
 		overrides.ModelIDs = modelIDs
 	}
 
+	if raw := strings.TrimSpace(os.Getenv("CLAWMANAGER_LLM_VISION")); raw != "" {
+		var values map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(raw), &values); err != nil || values == nil {
+			return llmOverrides{}, false, fmt.Errorf("invalid CLAWMANAGER_LLM_VISION")
+		}
+		overrides.Vision = map[string]bool{}
+		for id, v := range values {
+			if string(v) != "true" && string(v) != "false" {
+				return llmOverrides{}, false, fmt.Errorf("invalid vision capability")
+			}
+			overrides.Vision[id] = string(v) == "true"
+		}
+	}
 	overrides.BaseURL = firstNonEmptyEnv("CLAWMANAGER_LLM_BASE_URL")
 	overrides.APIKey, overrides.APIKeySet = firstLookupEnv("CLAWMANAGER_LLM_API_KEY")
 
@@ -448,6 +462,26 @@ func normalizeLLMConfigContent(cfg map[string]any, overrides llmOverrides) {
 	}
 	if len(overrides.ModelIDs) > 0 {
 		provider["models"] = buildProviderModels(provider["models"], overrides.ModelIDs)
+		for _, entry := range provider["models"].([]any) {
+			model := entry.(map[string]any)
+			if enabled, ok := overrides.Vision[stringValue(model["id"])]; ok {
+				input := []any{}
+				if previous, ok := model["input"].([]any); ok {
+					for _, value := range previous {
+						if s, ok := value.(string); ok && !strings.HasPrefix(s, "image") {
+							input = append(input, s)
+						}
+					}
+				}
+				if len(input) == 0 {
+					input = append(input, "text")
+				}
+				if enabled {
+					input = append(input, "image")
+				}
+				model["input"] = input
+			}
+		}
 
 		agents := ensureObject(cfg, "agents")
 		defaults := ensureObject(agents, "defaults")

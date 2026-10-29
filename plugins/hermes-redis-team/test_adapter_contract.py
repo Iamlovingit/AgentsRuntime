@@ -1727,6 +1727,8 @@ class HermesRedisTeamContractTests(unittest.TestCase):
 
             class FakeRedis:
                 async def command(self, *args):
+                    if args[0] == "GET":
+                        return None
                     reads.append(args)
                     read_id = args[-1]
                     if read_id == "0":
@@ -1770,6 +1772,8 @@ class HermesRedisTeamContractTests(unittest.TestCase):
             class FakeRedis:
                 async def command(self, *args):
                     nonlocal pending_reads
+                    if args[0] == "GET":
+                        return None
                     read_id = args[-1]
                     if read_id == "0":
                         pending_reads += 1

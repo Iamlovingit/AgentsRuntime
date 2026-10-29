@@ -15,6 +15,11 @@ import (
 )
 
 type gatewayRecord struct {
+	stopOperation        string
+	stopBusy             bool
+	stopConfirmed        bool
+	deletePending        bool
+	deleteBusy           bool
 	executionCleanup     func(context.Context) error
 	state                GatewayState
 	process              ManagedProcess
@@ -30,6 +35,7 @@ type gatewayRecord struct {
 }
 
 type GatewayManager struct {
+	stopEpoch    string
 	cfg          Config
 	starter      ProcessStarter
 	ports        *PortAllocator
@@ -71,6 +77,7 @@ func NewGatewayManager(cfg Config, starter ProcessStarter, ports *PortAllocator)
 		capabilities = CloneHealthCapabilities(provider.HealthCapabilities())
 	}
 	manager := &GatewayManager{
+		stopEpoch:     newStopEpoch(),
 		cfg:           cfg,
 		starter:       starter,
 		ports:         ports,
@@ -133,6 +140,12 @@ func (m *GatewayManager) CreateGateway(_ context.Context, req CreateGatewayReque
 	}
 
 	gatewayID := gatewayID(req.InstanceID, req.Generation)
+	for _, record := range m.gateways {
+		if record.state.InstanceID == req.InstanceID && (record.stopOperation != "" || record.deletePending) {
+			m.mu.Unlock()
+			return CreateGatewayResponse{}, ErrGatewayStopConflict
+		}
+	}
 	if existing, ok := m.gateways[gatewayID]; ok {
 		resp := createGatewayResponse(existing.state)
 		m.mu.Unlock()
@@ -441,10 +454,15 @@ func (m *GatewayManager) StopGatewayConfirmed(ctx context.Context, gatewayID str
 		m.mu.Unlock()
 		return nil
 	}
+	if record.stopOperation != "" || record.deleteBusy || record.state.State == "starting" {
+		m.mu.Unlock()
+		return ErrGatewayStopConflict
+	}
 	if record.state.State == "stopping" {
 		m.mu.Unlock()
 		return fmt.Errorf("%w: gateway %s is already stopping", ErrGatewayStopFailed, gatewayID)
 	}
+	record.deletePending, record.deleteBusy = true, true
 	record.state.State = "stopping"
 	record.state.UpdatedAt = time.Now().UTC()
 	process := record.process
@@ -452,25 +470,30 @@ func (m *GatewayManager) StopGatewayConfirmed(ctx context.Context, gatewayID str
 	m.notifyGatewayStateChangedLocked()
 	m.mu.Unlock()
 
+	var stopErr error
 	if process.Stop != nil {
-		if err := process.Stop(ctx); err != nil {
-			m.mu.Lock()
-			if current, exists := m.gateways[gatewayID]; exists && current.process.PID == pid && current.state.State == "stopped" {
-				m.ports.Release(current.state.Port)
-				delete(m.gateways, gatewayID)
-				m.notifyGatewayStateChangedLocked()
-				m.mu.Unlock()
-				return nil
-			}
-			if current, exists := m.gateways[gatewayID]; exists && current.process.PID == pid {
-				current.state.State = "stop_error"
-				current.state.ErrorMessage = err.Error()
-				current.state.UpdatedAt = time.Now().UTC()
-				m.notifyGatewayStateChangedLocked()
-			}
+		stopErr = process.Stop(ctx)
+	} else if process.PID > 0 {
+		stopErr = ErrGatewayStopUnsupported
+	}
+	if err := stopErr; err != nil {
+		m.mu.Lock()
+		if current, exists := m.gateways[gatewayID]; exists && current.process.PID == pid && current.state.State == "stopped" {
+			m.ports.Release(current.state.Port)
+			delete(m.gateways, gatewayID)
+			m.notifyGatewayStateChangedLocked()
 			m.mu.Unlock()
-			return fmt.Errorf("%w: %v", ErrGatewayStopFailed, err)
+			return nil
 		}
+		if current, exists := m.gateways[gatewayID]; exists && current.process.PID == pid {
+			current.deleteBusy = false
+			current.state.State = "stop_error"
+			current.state.ErrorMessage = err.Error()
+			current.state.UpdatedAt = time.Now().UTC()
+			m.notifyGatewayStateChangedLocked()
+		}
+		m.mu.Unlock()
+		return fmt.Errorf("%w: %w", ErrGatewayStopFailed, err)
 	}
 
 	m.mu.Lock()
@@ -752,7 +775,7 @@ func (m *GatewayManager) stopGatewayLocked(ctx context.Context, id string) {
 
 func (m *GatewayManager) detachGatewayLocked(id string) ManagedProcess {
 	record, ok := m.gateways[id]
-	if !ok {
+	if !ok || record.stopOperation != "" || record.deletePending {
 		return ManagedProcess{}
 	}
 	m.ports.Release(record.state.Port)
@@ -826,7 +849,7 @@ func (m *GatewayManager) watchGatewayProcess(id string, pid int, done <-chan err
 	err := <-done
 	m.mu.Lock()
 	record, ok := m.gateways[id]
-	if !ok || record.process.PID != pid {
+	if !ok || record.process.PID != pid || (record.process.Done != nil && record.process.Done != done) || record.stopOperation != "" {
 		m.mu.Unlock()
 		return
 	}
@@ -840,6 +863,10 @@ func (m *GatewayManager) watchGatewayProcess(id string, pid int, done <-chan err
 		record.state.UpdatedAt = now
 		record.state.HealthAt = now
 		m.notifyGatewayStateChangedLocked()
+		m.mu.Unlock()
+		return
+	}
+	if record.deletePending {
 		m.mu.Unlock()
 		return
 	}
@@ -1110,6 +1137,10 @@ func (m *GatewayManager) stopProcessAsync(process ManagedProcess) {
 func (m *GatewayManager) usedSlotsLocked() int {
 	count := 0
 	for _, record := range m.gateways {
+		if record.stopOperation != "" || record.deletePending {
+			count++ // Retain the reserved slot until a future fenced migration releases it.
+			continue
+		}
 		switch record.state.State {
 		case "running", "starting", "unhealthy":
 			count++
@@ -1262,8 +1293,10 @@ func (s *ExecProcessStarter) StartGateway(ctx context.Context, spec GatewayStart
 	var cleanup func()
 	done := make(chan error, 1)
 	notifyDone := make(chan error, 1)
+	exited := make(chan struct{})
 	go func() {
 		err := cmd.Wait()
+		close(exited)
 		done <- err
 		notifyDone <- err
 		close(done)
@@ -1273,8 +1306,9 @@ func (s *ExecProcessStarter) StartGateway(ctx context.Context, spec GatewayStart
 	stopped := false
 
 	process := ManagedProcess{
-		PID:  cmd.Process.Pid,
-		Done: notifyDone,
+		GracefulStop: newGracefulGatewayStop(cmd, exited),
+		PID:          cmd.Process.Pid,
+		Done:         notifyDone,
 		Stop: func(stopCtx context.Context) error {
 			stopMu.Lock()
 			defer stopMu.Unlock()
@@ -1285,7 +1319,17 @@ func (s *ExecProcessStarter) StartGateway(ctx context.Context, spec GatewayStart
 			if timeout <= 0 {
 				timeout = 20 * time.Second
 			}
-			err := stopGatewayCommand(stopCtx, cmd, done, timeout)
+			var err error
+			select {
+			case <-exited:
+			default:
+				err = stopGatewayCommand(stopCtx, cmd, done, timeout)
+			}
+			select {
+			case <-exited:
+				err = nil
+			default:
+			}
 			if err == nil {
 				stopped = true
 				if cleanup != nil {

@@ -31,6 +31,7 @@ func writeUpgradeOperationError(w http.ResponseWriter, err error) {
 
 func NewControlHandler(cfg gateway.Config, manager *gateway.GatewayManager, reporter gateway.HeartbeatReporter) http.Handler {
 	mux := http.NewServeMux()
+	registerConfirmedStopRoutes(mux, cfg, manager)
 	if cfg.ProxyPolicyFile != "" {
 		policy := gateway.NewProxyPolicyStore(cfg.ProxyPolicyFile, cfg.Namespace)
 		mux.HandleFunc("/v1/proxy-policy", func(w http.ResponseWriter, r *http.Request) {
@@ -478,7 +479,7 @@ func writeCreateGatewayError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, gateway.ErrRuntimeType), errors.Is(err, gateway.ErrWorkspacePath):
 		http.Error(w, err.Error(), http.StatusBadRequest)
-	case errors.Is(err, gateway.ErrDraining), errors.Is(err, gateway.ErrUpgradeStandby), errors.Is(err, gateway.ErrNoFreePort), errors.Is(err, gateway.ErrStaleGeneration), errors.Is(err, gateway.ErrActiveGeneration), errors.Is(err, gateway.ErrWriterLeaseActive):
+	case errors.Is(err, gateway.ErrGatewayStopConflict), errors.Is(err, gateway.ErrDraining), errors.Is(err, gateway.ErrUpgradeStandby), errors.Is(err, gateway.ErrNoFreePort), errors.Is(err, gateway.ErrStaleGeneration), errors.Is(err, gateway.ErrActiveGeneration), errors.Is(err, gateway.ErrWriterLeaseActive):
 		http.Error(w, err.Error(), http.StatusConflict)
 	case errors.Is(err, gateway.ErrGatewayStartFailed):
 		http.Error(w, err.Error(), http.StatusInternalServerError)

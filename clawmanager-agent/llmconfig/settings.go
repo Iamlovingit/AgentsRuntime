@@ -28,6 +28,7 @@ type ResolveOptions struct {
 }
 
 type Settings struct {
+	Vision           map[string]bool
 	BaseURL          string
 	APIKey           string
 	APIKeySet        bool
@@ -51,6 +52,7 @@ type ProviderModels struct {
 }
 
 type Canonical struct {
+	Vision           map[string]bool   `json:"vision,omitempty"`
 	BaseURL          string            `json:"base_url,omitempty"`
 	APIKeySet        bool              `json:"api_key_set"`
 	APIKeySource     string            `json:"api_key_env,omitempty"`
@@ -75,6 +77,7 @@ func FromGatewayConfig(cfg gateway.Config) Settings {
 		APIKeySource:     cfg.LLMAPIKeyEnvName,
 		ModelIDs:         append([]string(nil), cfg.LLMModelIDs...),
 		ModelsQualified:  cfg.LLMModelsQualified,
+		Vision:           cloneBoolMap(cfg.LLMVision),
 		Reasoning:        cloneBoolMap(cfg.LLMReasoning),
 		ReasoningControl: cloneStringMap(cfg.LLMReasoningControl),
 	}
@@ -87,6 +90,7 @@ func (settings Settings) ApplyTo(cfg gateway.Config) gateway.Config {
 	cfg.LLMAPIKeyEnvName = settings.APIKeySource
 	cfg.LLMModelIDs = append([]string(nil), settings.ModelIDs...)
 	cfg.LLMModelsQualified = settings.ModelsQualified
+	cfg.LLMVision = cloneBoolMap(settings.Vision)
 	cfg.LLMReasoning = cloneBoolMap(settings.Reasoning)
 	cfg.LLMReasoningControl = cloneStringMap(settings.ReasoningControl)
 	return cfg
@@ -151,6 +155,13 @@ func resolve(initial Settings, lookup envLookup, options ResolveOptions, emptyAP
 		resolved.ModelSource = source
 	}
 
+	if _, raw, ok := lookup("CLAWMANAGER_LLM_VISION"); ok {
+		vision, err := gateway.ParseVisionCapabilities(raw)
+		if err != nil {
+			return Settings{}, err
+		}
+		resolved.Vision = vision
+	}
 	if source, raw, ok := firstNonBlank(lookup, ReasoningEnv); ok {
 		reasoning, err := parseReasoning(raw, source)
 		if err != nil {
@@ -270,6 +281,7 @@ func (settings Settings) Canonical(fallbackProvider string) Canonical {
 		APIKeySource:     settings.APIKeySource,
 		ModelIDs:         append([]string(nil), settings.ModelIDs...),
 		ModelsQualified:  settings.ModelsQualified,
+		Vision:           cloneBoolMap(settings.Vision),
 		ModelSource:      settings.ModelSource,
 		Models:           refs,
 		Providers:        GroupModelRefs(refs),

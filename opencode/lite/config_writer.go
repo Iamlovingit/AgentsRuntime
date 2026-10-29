@@ -103,13 +103,25 @@ func RenderConfig(settings llmconfig.Settings) ([]byte, error) {
 	}
 	providers := legacyProviderConfig(settings.BaseURL, apiKeyEnv, settings.ModelIDs)
 	enabledProviders := []string{clawmanagerProviderID}
+	refs := settings.ModelRefs(clawmanagerProviderID)
 	if settings.ModelsQualified {
-		refs := settings.ModelRefs("auto")
+		refs = settings.ModelRefs("auto")
 		if len(refs) == 0 {
 			return nil, fmt.Errorf("missing OpenCode LLM models")
 		}
 		modelID = refs[0].Qualified
 		providers, enabledProviders = qualifiedProviderConfig(settings.BaseURL, apiKeyEnv, llmconfig.GroupModelRefs(refs))
+	}
+	for _, ref := range refs {
+		enabled, managed := settings.Vision[ref.Qualified]
+		if !managed {
+			enabled, managed = settings.Vision[ref.ModelID]
+		}
+		if managed {
+			provider := providers[ref.ProviderID].(map[string]any)
+			model := provider["models"].(map[string]any)[ref.ModelID].(map[string]any)
+			model["capabilities"] = map[string]any{"input": gateway.VisionInputModalities(nil, enabled), "output": []string{"text"}}
+		}
 	}
 	doc := map[string]any{
 		"$schema":            "https://opencode.ai/config.json",
@@ -167,7 +179,7 @@ func disabledProviders(enabled []string) []string {
 	return disabled
 }
 
-func modelsMap(models []string) map[string]any {
+func modelsMap(models []string, visionMaps ...map[string]bool) map[string]any {
 	out := make(map[string]any, len(models))
 	for _, id := range models {
 		name := id
@@ -175,6 +187,11 @@ func modelsMap(models []string) map[string]any {
 			name = "ClawManager Auto"
 		}
 		out[id] = map[string]any{"name": name}
+		if len(visionMaps) > 0 {
+			if vision, managed := visionMaps[0][id]; managed {
+				out[id].(map[string]any)["capabilities"] = map[string]any{"input": gateway.VisionInputModalities(nil, vision), "output": []string{"text"}}
+			}
+		}
 	}
 	return out
 }

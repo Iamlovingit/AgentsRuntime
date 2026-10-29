@@ -969,6 +969,14 @@ func mergeOpenClawLLMConfig(config map[string]any, cfg gateway.Config) {
 				providerReasoning[group.ProviderID],
 				providerReasoningControl[group.ProviderID],
 			)
+			for _, entry := range provider["models"].([]any) {
+				model := entry.(map[string]any)
+				id := configStringValue(model["id"])
+				ref := llmconfig.ModelRef{ModelID: id, Qualified: group.ProviderID + "/" + id}
+				if vision, managed := openClawSettingForRef(cfg.LLMVision, ref); managed {
+					model["input"] = gateway.VisionInputModalities(model["input"], vision)
+				}
+			}
 		}
 
 		agents := ensureObject(config, "agents")

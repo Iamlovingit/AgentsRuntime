@@ -232,6 +232,9 @@ func writeProtectedHermesLegacyConfig(cfg gateway.Config, req gateway.CreateGate
 			return nil, err
 		}
 		mergeDesktopWebYAMLNode(document.Content[0], overlay.Content[0])
+		if err := applyManagedVisionYAML(document.Content[0], cfg); err != nil {
+			return nil, err
+		}
 		var buffer bytes.Buffer
 		encoder := yaml.NewEncoder(&buffer)
 		encoder.SetIndent(2)
